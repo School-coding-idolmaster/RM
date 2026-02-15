@@ -1,0 +1,65 @@
+[project]
+name = "robomorph"
+version = "1.0.0"
+description = "Evolving Robot Morphology using Large Language Models"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10,<3.13"
+authors = [
+    { name = "Kevin Qiu" },
+    { name = "Wladyslaw Palucki" },
+    { name = "Krzysztof Ciebiera" },
+    { name = "Pawel Fijalkowski" },
+    { name = "Marek Cygan" },
+    { name = "Lukasz Kucinski" },
+]
+keywords = ["robotics", "evolution", "llm", "morphology", "reinforcement-learning", "brax", "mujoco"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # LLM
+    "openai>=1.16,<2",
+    # RL / Physics
+    "brax==0.10.5",
+    "gym>=0.26,<1",
+    "jax==0.4.30",
+    "jaxlib==0.4.30",
+    "mujoco==3.2.6",
+    "mujoco-mjx==3.2.6",
+    # Data / ML
+    "numpy>=1.24,<2",
+    "pandas>=2.2,<3",
+    "pydantic>=2.5,<3",
+    # Visualization
+    "matplotlib>=3.7,<4",
+    # Utilities
+    "python-dotenv>=1.0,<2",
+    "rich>=13,<15",
+    "wandb>=0.24,<1",
+]
+
+[project.scripts]
+robomorph = "robomorph.main:main"
+
+[project.urls]
+Homepage = "https://github.com/kevinxqiu/robomorph"
+Paper = "https://arxiv.org/abs/2407.08626"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["robomorph", "compiler", "train"]
+
+[dependency-groups]
+dev = []

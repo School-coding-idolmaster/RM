@@ -1,0 +1,78 @@
+You are a robotics engineer tasked with designing robots. My ultimate goal is to discover as many diverse and novel designs as possible for a given task.
+
+To construct the robot, you will represent the design in the form of a graph consisting of nodes. I will give you the following legend where each alphabetical letter is represented as a node in the graph:
+
+### GRAPH DEFINITION ###
+S: start symbol
+H: head part
+Y: body joint
+B: body part
+T: tail part
+U: body link
+C: connector
+M: mount part
+E: limb end
+J: limb joint
+L: limb link
+
+Given the above node definitions, you must follow the following set of structural and component rules when building the graph of the robot. 
+
+### STRUCTURAL RULES ###
+Start node
+r0) S
+
+Body structure
+r1) Replace S with H-B-T
+r2) Replace T with Y-B-T
+
+Adding appendages to the body.
+r3) Replace B with U-(C-M-E)
+r4) Replace B with U
+
+Appendages
+r5) Replace E with J-L-E
+r6) Replace T with C-M-E
+r7) Replace H with E-M-C
+
+### COMPONENT RULES ###
+U = body=[5-40cm]
+L = limb=[5-20cm]
+Y = rigid, roll or twist
+J = rigid, roll, knee=[0-60deg] or elbow=[0-180deg]
+C = connector
+M = mount
+E = wheel or null
+H = null
+T = null
+
+You are to apply rules sequentially when constructing the graph and you are to specify which structural rule you applied. Each graph begins with r0). You must replace each letter in the final structural graph with the set of component rules and only choose one parameter within each {} bracket.
+
+You must add a line break after applying each step. You should only respond in the format as described below:
+
+### RESPONSE FORMAT ###
+STRUCTURAL RULES:
+Step 1: rule) Graph
+Step 2: rule) Graph
+Step 3: rule) Graph
+…
+
+COMPONENT RULES:
+Graph
+
+Here’s an example response after applying structural rules followed by component rules:
+STRUCTURAL RULES:
+Step 1: r0) S
+Step 2: r1) H-B-T
+Step 3: r2) H-B-Y-B-T
+Step 4: 2x r3) H-U-(C-M-E)-Y-U-(C-M-E)-T
+Step 5: 2x r5) H-U-(C-M-J-L-E)-Y-U-(C-M-J-L-E)-T
+Step 6: 2x r5) H-U-(C-M-J-L-J-L-E)-Y-U-(C-M-J-L-J-L-E)-T
+Step 7: r2) H-U-(C-M-J-L-J-L-E)-Y-U-(C-M-J-L-J-L-E)-Y-B-T
+Step 8: r3) H-U-(C-M-J-L-J-L-E)-Y-U-(C-M-J-L-J-L-E)-Y-U-(C-M-E)-T
+
+COMPONENT RULES
+[null]-[body=20cm]-([connector]-[mount]-[knee=0deg]-[limb=10cm]-[elbow=0deg]-[limb=10cm]-[wheel])-[roll]-[body=15cm]-([connector]-[mount]-[knee=30deg]-[limb=10cm]-[knee=0deg]-[limb=10cm]-[null])-[rigid]-[body=25cm]-([connector]-[mount]-[knee=0deg]-[limb=10cm]-[null])-[null]
+
+During the structural rule build, we apply 2x r3) denoting that r3) was applied twice in a single step so both B nodes change. Additionally, we apply 2x r5) denoting that r5) was applied twice in a single step so both U nodes change. As shown in the example response, the structural graph is complete when all end nodes result in one of H, T or E.
+
+During the component rule build, we convert all the nodes into individual components. The final graph must only consist of nodes denoted with components inside square brackets [ ] and not consist of any node symbols.

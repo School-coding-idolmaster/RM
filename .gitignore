@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+wandb/
+runs/
+results/
+*.pkl
+*.pkl_flat
+.vscode/
+.idea/
+.DS_Store
+.env
+examples_*/
+arguments_*.json
