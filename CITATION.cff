@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: If you use RoboMorph, please cite the paper listed in preferred-citation.
+title: RoboMorph
+authors:
+- family-names: Qiu
+  given-names: Kevin
+license: MIT
+repository-code: https://github.com/kevinxqiu/robomorph
+preferred-citation:
+  type: conference-paper
+  title: 'RoboMorph: Evolving Robot Morphology using Large Language Models'
+  authors:
+  - family-names: Qiu
+    given-names: Kevin
+  - family-names: Pałucki
+    given-names: Władysław
+  - family-names: Ciebiera
+    given-names: Krzysztof
+  - family-names: Fijałkowski
+    given-names: Paweł
+  - family-names: Cygan
+    given-names: Marek
+  - family-names: Kuciński
+    given-names: Łukasz
+  conference:
+    name: 2026 IEEE International Conference on Robotics and Automation (ICRA)
+  collection-title: 2026 IEEE International Conference on Robotics and Automation (ICRA)
+  year: 2026
+  start: 17611
+  end: 17618
+  publisher:
+    name: IEEE
+  doi: 10.1109/icra57385.2026.11696020
+  url: https://doi.org/10.1109/icra57385.2026.11696020
