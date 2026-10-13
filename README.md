@@ -3,7 +3,7 @@
 [![Paper](https://img.shields.io/badge/arXiv-2407.08626-b31b1b.svg)](https://arxiv.org/abs/2407.08626)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![ICRA 2026](https://img.shields.io/badge/ICRA-2026-orange.svg)](https://arxiv.org/abs/2407.08626)
+[![ICRA 2026](https://img.shields.io/badge/ICRA-2026-orange.svg)](https://doi.org/10.1109/icra57385.2026.11696020)
 
 **RoboMorph** automatically discovers diverse, high-performing robot morphologies by combining large language models with evolutionary search. Given a task description, it evolves robot body plans across generations without any manual design.
 
@@ -214,11 +214,15 @@ train/                         # RL training infrastructure
 If you use RoboMorph in your research, please cite:
 
 ```bibtex
-@article{qiu2024robomorph,
-  title={Robomorph: Evolving robot morphology using large language models},
-  author={Qiu, Kevin and Pa{\l}ucki, W{\l}adys{\l}aw and Ciebiera, Krzysztof and Fija{\l}kowski, Pawe{\l} and Cygan, Marek and Kuci{\'n}ski, {\L}ukasz},
-  journal={arXiv preprint arXiv:2407.08626},
-  year={2024}
+@inproceedings{qiu2024robomorph,
+  title = {{RoboMorph}: Evolving Robot Morphology using Large Language Models},
+  author = {Qiu, Kevin and Pa{\l}ucki, W{\l}adys{\l}aw and Ciebiera, Krzysztof and Fija{\l}kowski, Pawe{\l} and Cygan, Marek and Kuci{\'n}ski, {\L}ukasz},
+  booktitle = {2026 IEEE International Conference on Robotics and Automation (ICRA)},
+  year = {2026},
+  pages = {17611--17618},
+  publisher = {IEEE},
+  doi = {10.1109/icra57385.2026.11696020},
+  url = {https://doi.org/10.1109/icra57385.2026.11696020}
 }
 ```
 
