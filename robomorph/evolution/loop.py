@@ -1,5 +1,7 @@
 import csv
 import logging
+import math
+import json
 import os
 import re
 import time
@@ -41,14 +43,11 @@ def init_run(population: Population, exp_name: str, results_path: str):
     results_dir = os.path.dirname(results_path)
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)
-    try:
-        with open(results_path, "w", newline="") as f:
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(
-                ["generation", "unit_id", "xml_file", "structural", "component", "fitness", "diversity"]
-            )
-    except Exception as e:
-        logger.error(f"Failed to create results CSV: {e}")
+    with open(results_path, "x", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(
+            ["generation", "unit_id", "xml_file", "structural", "component", "fitness", "diversity", "error"]
+        )
 
     return population
 
@@ -64,6 +63,7 @@ def run_for_n(
     seed: int = 42,
     timesteps: int = 1_000_000,
     top_k: int = 3,
+    log: bool = True,
 ):
     """Run the genetic algorithm for n generations."""
     results_dir = os.path.dirname(results_path)
@@ -72,7 +72,7 @@ def run_for_n(
         os.makedirs(results_dir, exist_ok=True)
     population_size = len(population.units)
 
-    with open(time_elapse_path, "w", newline="") as f:
+    with open(time_elapse_path, "x", newline="") as f:
         writer = csv.writer(f, delimiter=";")
         writer.writerow(["generation", "time_seconds"])
 
@@ -82,7 +82,7 @@ def run_for_n(
 
         _evaluate_fitness(
             exp_name, generation, population, client, terrain, model_name,
-            results_path=results_path, seed=seed, timesteps=timesteps, top_k=top_k,
+            results_path=results_path, seed=seed, timesteps=timesteps, top_k=top_k, log=log,
         )
 
         # Selection step: keep top designs
@@ -95,21 +95,24 @@ def run_for_n(
             writer = csv.writer(f, delimiter=";")
             writer.writerow([generation, f"{elapsed:.2f}"])
 
-        try:
-            with open(results_path, "a", newline="") as f:
-                writer = csv.writer(f, delimiter=";")
-                for i, unit in enumerate(population.units):
-                    writer.writerow([
-                        generation,
-                        i,
-                        f"evo{generation}_unit{i}.xml",
-                        unit.structure,
-                        unit.components,
-                        unit.fitness,
-                        unit.diversity,
-                    ])
-        except Exception as e:
-            logger.error(f"Failed to write results CSV: {e}")
+        with open(results_path, "a", newline="") as f:
+            writer = csv.writer(f, delimiter=";")
+            for unit in population.units:
+                # Preserve the design's original ID after fitness sorting.
+                xml_file = os.path.relpath(unit.xml_path, results_dir or ".") if unit.xml_path else ""
+                writer.writerow([
+                    generation,
+                    unit.unit_id,
+                    xml_file,
+                    unit.structure,
+                    unit.components,
+                    unit.fitness,
+                    unit.diversity,
+                    unit.error,
+                ])
+
+        if not any(math.isfinite(unit.fitness) for unit in population.units):
+            raise RuntimeError(f"Generation {generation} has no successful training results; inspect the results CSV and failure files")
 
     return population
 
@@ -123,7 +126,10 @@ def generate_grammar(client: OpenAI, system_prompt: str, user_prompt: str, model
             {"role": "user", "content": user_prompt},
         ],
     )
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("LLM returned an empty design response")
+    return content
 
 
 def extract_last_step(text):
@@ -158,6 +164,7 @@ def _evaluate_fitness(
     seed: int = 42,
     timesteps: int = 1_000_000,
     top_k: int = 3,
+    log: bool = True,
 ) -> Population:
     """Evaluate fitness: LLM design -> compile -> train -> update population."""
     logger.info("Starting fitness evaluation...")
@@ -165,7 +172,7 @@ def _evaluate_fitness(
 
     results_dir = os.path.dirname(results_path) or "."
 
-    elite_fitness = -1
+    elite_fitness = float("-inf")
 
     population_file = os.path.join(results_dir, f"population_{exp_name}.txt")
     curr_population = read_txt(population_file) if os.path.exists(population_file) else ""
@@ -178,16 +185,24 @@ def _evaluate_fitness(
 
     xml_exp_dir = os.path.join(results_dir, f"examples_{exp_name}")
     os.makedirs(xml_exp_dir, exist_ok=True)
+    if generation == 0:
+        with open(os.path.join(xml_exp_dir, "grammar_prompt.txt"), "x") as f:
+            f.write(grammar_system)
 
     for i, unit in enumerate(population.units):
         # Reset unit state for this generation's new design
-        unit.fitness = -1
+        unit.unit_id = i
+        unit.fitness = float("-inf")
+        unit.error = None
         unit.xml_path = None
 
         grammar = generate_grammar(
             client, grammar_system,
             unit.prompt + " " + curr_population, model_name,
         )
+        response_path = os.path.join(xml_exp_dir, f"evo{generation}_unit{i}.txt")
+        with open(response_path, "x") as f:
+            f.write(grammar)
         structural_graph = extract_last_step(grammar)
         component_graph = extract_bracket_line(grammar)
         diversity = None
@@ -198,17 +213,26 @@ def _evaluate_fitness(
             try:
                 robot_xml = make_robot(compile_robot(component_graph))
                 xml_path = os.path.join(xml_exp_dir, f"evo{generation}_unit{i}.xml")
-                with open(xml_path, "w") as f:
+                with open(xml_path, "x") as f:
                     f.write(robot_xml)
                 if xml_has_joints(xml_path):
                     xml_paths.append(xml_path)
                     unit.xml_path = xml_path
+                else:
+                    unit.error = "Compiled design has no actuator joints"
             except Exception as e:
-                logger.warning(f"Failed to compile unit {i}: {e}")
+                unit.error = f"Compilation failed: {e}"
+                logger.warning("Failed to compile unit %d: %s", i, e)
+
+        else:
+            unit.error = "LLM response has no component graph"
 
         unit.structure = structural_graph
         unit.components = component_graph
         unit.diversity = diversity
+
+    if not xml_paths:
+        raise RuntimeError(f"Generation {generation} produced no trainable designs; inspect the LLM responses and compiler warnings")
 
     # Train multiple models in parallel
     results = train_multiple_models(
@@ -216,21 +240,25 @@ def _evaluate_fitness(
         terrain=terrain,
         timesteps=timesteps,
         seed=seed,
+        log=log,
+        output_dir=os.path.join(results_dir, f"runs_{exp_name}"),
     )
-    if results is None:
-        logger.warning("Training timed out, no results returned")
-        results = []
     results_dict = dict(results)
 
     for unit in population.units:
         if unit.xml_path in results_dict:
             unit.fitness = results_dict[unit.xml_path]
+            if not math.isfinite(unit.fitness):
+                failure_path = os.path.join(results_dir, f"runs_{exp_name}", f"failure_{os.path.splitext(os.path.basename(unit.xml_path))[0]}.json")
+                with open(failure_path) as f:
+                    unit.error = json.load(f)["error"]
 
         if unit.fitness > elite_fitness:
             current_elite = unit.model_copy()
             elite_fitness = unit.fitness
 
-        unit_records.append((unit.structure, unit.components, unit.fitness))
+        if math.isfinite(unit.fitness):
+            unit_records.append((unit.structure, unit.components, unit.fitness))
 
     # Update population file with top designs
     old_records = convert_dataset_to_zip(curr_population)

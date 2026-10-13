@@ -5,17 +5,7 @@ import pickle
 import time
 from dataclasses import dataclass
 from os.path import join
-
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import wandb
-from brax.io import model
-from brax.training.agents.ppo import train as ppo
-from brax.training.agents.sac import train as sac
-
-from train.envs import create_env
-from train.render_policy import render_from_path
+from pathlib import Path
 
 
 @dataclass
@@ -29,7 +19,7 @@ class ExperimentConfig:
     num_evals: int = 1
     terrain: str = 'flat'
     seed: int = 42
-
+    output_dir: str = 'runs'
 
 @dataclass
 class Hyperparameters:
@@ -49,16 +39,46 @@ WANDB_ENTITY = os.environ.get('WANDB_ENTITY', None)
 WANDB_PROJECT = os.environ.get('WANDB_PROJECT', 'robomorph')
 
 
+def _validate_config(config: ExperimentConfig, hyperparameters: Hyperparameters):
+    """Validate settings before importing RL dependencies or creating outputs."""
+    if config.algorithm not in {"sac", "ppo"}:
+        raise ValueError(f"Unknown algorithm: {config.algorithm}")
+    if hyperparameters.batch_size <= 0:
+        raise ValueError("--batch_size must be positive")
+    if config.algorithm == "ppo":
+        if hyperparameters.num_minibatches <= 0:
+            raise ValueError("PPO requires a positive --num_minibatches (for example, 16 with --batch_size 256)")
+        if hyperparameters.batch_size * hyperparameters.num_minibatches % NUM_ENVS != 0:
+            raise ValueError(
+                f"PPO requires batch_size * num_minibatches to be divisible by {NUM_ENVS}; "
+                "use --batch_size 256 --num_minibatches 16, or another compatible combination"
+            )
+    if config.xml is None or not os.path.isfile(config.xml):
+        raise ValueError(f"Robot XML does not exist: {config.xml}")
+    if config.timesteps <= 0 or config.num_evals <= 0:
+        raise ValueError("timesteps and num_evals must be positive")
+
+
 def train_policy(config: ExperimentConfig, hyperparameters: Hyperparameters) -> float:
     """Train an RL agent on a robot XML and return forward velocity as fitness."""
-    start_time = time.time()
+    _validate_config(config, hyperparameters)
 
-    run_dir = join("runs", f"{config.name or 'unnamed_run'}_s_{config.seed}")
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import wandb
+    from brax.io import model
+    from brax.training.agents.ppo import train as ppo
+    from brax.training.agents.sac import train as sac
+    from train.envs import create_env
+
+    start_time = time.time()
+    run_dir = join(config.output_dir, f"{config.name or 'unnamed_run'}_s_{config.seed}")
     params_path = join(run_dir, "params")
     args_path = join(run_dir, "args.pkl")
     plot_path = join(run_dir, "plot.png")
 
-    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(run_dir, exist_ok=False)
 
     env = create_env(config.terrain, config.xml)
     if config.algorithm == "ppo":
@@ -95,7 +115,7 @@ def train_policy(config: ExperimentConfig, hyperparameters: Hyperparameters) -> 
         )
 
     full_config = train_fn.keywords.copy()
-    full_config["xml"] = config.xml
+    full_config["xml"] = str(Path(config.xml).resolve())
     full_config["algorithm"] = config.algorithm
     full_config["env"] = config.terrain
 
@@ -121,36 +141,42 @@ def train_policy(config: ExperimentConfig, hyperparameters: Hyperparameters) -> 
         print(f"Step: {num_steps}, reward: {metrics['eval/episode_reward']:.2f}, "
               f"forward: {metrics['eval/episode_reward_forward']:.2f}")
 
-    _, params, _ = train_fn(environment=env, progress_fn=progress)
+    try:
+        _, params, _ = train_fn(environment=env, progress_fn=progress)
 
-    model.save_params(params_path, params)
-    with open(args_path, "wb") as f:
-        pickle.dump(full_config, f)
+        model.save_params(params_path, params)
+        with open(args_path, "wb") as f:
+            pickle.dump(full_config, f)
 
-    print(f"Training finished in {time.time() - start_time:.1f}s, params at '{run_dir}'")
+        print(f"Training finished in {time.time() - start_time:.1f}s, params at '{run_dir}'")
 
-    fig = plt.figure()
-    plt.plot(steps, rewards)
-    plt.xlabel('# environment steps')
-    plt.ylabel('reward per episode')
-    plt.savefig(plot_path)
-    plt.close(fig)
+        fig = plt.figure()
+        plt.plot(steps, rewards)
+        plt.xlabel('# environment steps')
+        plt.ylabel('reward per episode')
+        plt.savefig(plot_path)
+        plt.close(fig)
 
-    if config.render:
-        render = render_from_path(run_dir)
-        wandb.log({"render": wandb.Html(render)})
+        if config.render:
+            from train.render_policy import render_from_path
+            render = render_from_path(run_dir)
+            wandb.log({"render": wandb.Html(render)})
 
-    wandb.finish()
-    return rewards_forward[-1] if rewards_forward else 0.0
+        if not rewards_forward:
+            raise RuntimeError("Training produced no evaluation metrics")
+        return rewards_forward[-1]
+    finally:
+        wandb.finish()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Training script arguments")
 
-    parser.add_argument("--xml", type=str, default=None)
+    parser.add_argument("--xml", type=str, required=True)
     parser.add_argument("--algorithm", choices=["ppo", "sac"], default="sac")
     parser.add_argument("--terrain", choices=["flat", "ridged", "beams", "frozen_lake"], default="flat")
     parser.add_argument("--name", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default="runs", help="Parent directory for a new training run")
     parser.add_argument("--render", default=False, action="store_true")
     parser.add_argument("--no_log", default=False, action="store_true")
     parser.add_argument("--timesteps", type=int, default=50_000_000, help="Training timesteps (default 50M for standalone, 1M during evolution)")
@@ -178,6 +204,7 @@ def main():
         num_evals=args.num_evals,
         terrain=args.terrain,
         seed=args.seed,
+        output_dir=args.output_dir,
     )
 
     hyperparameters = Hyperparameters(
