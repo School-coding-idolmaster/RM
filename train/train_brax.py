@@ -39,16 +39,29 @@ WANDB_ENTITY = os.environ.get('WANDB_ENTITY', None)
 WANDB_PROJECT = os.environ.get('WANDB_PROJECT', 'robomorph')
 
 
-def train_policy(config: ExperimentConfig, hyperparameters: Hyperparameters) -> float:
-    """Train an RL agent on a robot XML and return forward velocity as fitness."""
+def _validate_config(config: ExperimentConfig, hyperparameters: Hyperparameters):
+    """Validate settings before importing RL dependencies or creating outputs."""
     if config.algorithm not in {"sac", "ppo"}:
         raise ValueError(f"Unknown algorithm: {config.algorithm}")
-    if config.algorithm == "ppo" and hyperparameters.num_minibatches <= 0:
-        raise ValueError("PPO requires a positive --num_minibatches (for example, 4)")
+    if hyperparameters.batch_size <= 0:
+        raise ValueError("--batch_size must be positive")
+    if config.algorithm == "ppo":
+        if hyperparameters.num_minibatches <= 0:
+            raise ValueError("PPO requires a positive --num_minibatches (for example, 16 with --batch_size 256)")
+        if hyperparameters.batch_size * hyperparameters.num_minibatches % NUM_ENVS != 0:
+            raise ValueError(
+                f"PPO requires batch_size * num_minibatches to be divisible by {NUM_ENVS}; "
+                "use --batch_size 256 --num_minibatches 16, or another compatible combination"
+            )
     if config.xml is None or not os.path.isfile(config.xml):
         raise ValueError(f"Robot XML does not exist: {config.xml}")
     if config.timesteps <= 0 or config.num_evals <= 0:
         raise ValueError("timesteps and num_evals must be positive")
+
+
+def train_policy(config: ExperimentConfig, hyperparameters: Hyperparameters) -> float:
+    """Train an RL agent on a robot XML and return forward velocity as fitness."""
+    _validate_config(config, hyperparameters)
 
     import matplotlib
     matplotlib.use('Agg')

@@ -1,5 +1,6 @@
 """Offline regressions. Training and LLM calls are replaced by test doubles."""
 import contextlib
+import builtins
 import csv
 import io
 import os
@@ -19,7 +20,7 @@ from robomorph.evolution.population import EvolutionUnit
 from robomorph.evolution.utils import convert_dataset_to_zip, write_txt
 from robomorph.main import build_parser, main
 from train import parallel_train
-from train.train_brax import ExperimentConfig, Hyperparameters, train_policy
+from train.train_brax import ExperimentConfig, Hyperparameters, train_policy, _validate_config
 
 
 class ReleaseTests(unittest.TestCase):
@@ -204,6 +205,33 @@ main()
     def test_ppo_zero_minibatches_is_rejected_before_loading_rl(self):
         with self.assertRaisesRegex(ValueError, 'positive --num_minibatches'):
             train_policy(ExperimentConfig(xml='unused', name='test', algorithm='ppo'), Hyperparameters())
+
+    def test_ppo_incompatible_minibatches_fail_before_training_imports_or_outputs(self):
+        def forbidden_import(name, *args, **kwargs):
+            raise AssertionError(f"Validation imported {name}")
+        with tempfile.TemporaryDirectory() as temporary:
+            config = ExperimentConfig(xml='unused', name='test', algorithm='ppo', output_dir=temporary)
+            with patch.object(builtins, '__import__', side_effect=forbidden_import):
+                with self.assertRaisesRegex(ValueError, 'divisible by 4096'):
+                    train_policy(config, Hyperparameters(batch_size=256, num_minibatches=4))
+            self.assertFalse(list(Path(temporary).iterdir()))
+
+    def test_ppo_default_batch_and_sixteen_minibatches_pass_preflight(self):
+        def forbidden_import(name, *args, **kwargs):
+            raise AssertionError(f"Validation imported {name}")
+        with tempfile.TemporaryDirectory() as temporary:
+            xml = Path(temporary) / 'robot.xml'
+            xml.write_text('<mujoco/>')  # Preflight checks existence, not physics.
+            config = ExperimentConfig(xml=str(xml), name='test', algorithm='ppo', output_dir=str(Path(temporary) / 'runs'))
+            with patch.object(builtins, '__import__', side_effect=forbidden_import):
+                _validate_config(config, Hyperparameters(batch_size=256, num_minibatches=16))
+            self.assertFalse(Path(config.output_dir).exists())
+
+    def test_nonpositive_batch_size_fails_before_training_imports(self):
+        for algorithm in ['ppo', 'sac']:
+            for batch_size in [0, -1]:
+                with self.subTest(algorithm=algorithm, batch_size=batch_size), self.assertRaisesRegex(ValueError, '--batch_size must be positive'):
+                    train_policy(ExperimentConfig(xml='unused', name='test', algorithm=algorithm), Hyperparameters(batch_size=batch_size, num_minibatches=16))
 
     def test_renderer_preserves_existing_html_before_loading_policy(self):
         from train.render_policy import render_from_path

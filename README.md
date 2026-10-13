@@ -162,7 +162,7 @@ uv run --locked --extra cuda12 python -m train.train_brax \
     --name ant_flat --timesteps 1000000 --no_log
 ```
 
-The run is saved to `runs/ant_flat_s_42/`. Use a new name or `--output_dir` for a new run. PPO additionally requires a positive `--num_minibatches`, for example `--algorithm ppo --num_minibatches 4`. Run `uv run --locked python -m train.train_brax --help` for the full argument list.
+The run is saved to `runs/ant_flat_s_42/`. Use a new name or `--output_dir` for a new run. PPO additionally requires a positive `--num_minibatches` and `batch_size * num_minibatches` divisible by 4096. With the default `--batch_size 256`, use `--algorithm ppo --num_minibatches 16`. Run `uv run --locked python -m train.train_brax --help` for the full argument list.
 
 Render a policy you trained locally from the same working directory:
 
