@@ -1,122 +1,127 @@
 import logging
+import math
+import json
+import traceback
+import multiprocessing
 import os
 import queue
 import time
+from pathlib import Path
 
-import jax
-from multiprocessing import Queue, Process, Lock, log_to_stderr, get_logger
-
-from train.train_brax import train_policy, ExperimentConfig, Hyperparameters
-
-
-# Maximum time for RL brax training in SECONDS.
-# If the process takes more to train the pipeline is killed.
+# Timeout for one population's RL evaluations, in seconds.
 MAX_BRAX_TRAINING_TIME = 3600
 
 
-def train_multiple_models(xmls, *args, **kwargs):
-    """Train multiple robot XMLs in parallel across available GPUs.
+def gpu_ids():
+    """Return visible CUDA identifiers without remapping an existing allocation."""
+    jax_visible = os.environ.get("JAX_CUDA_VISIBLE_DEVICES", "all").strip().lower()
+    if jax_visible != "all":
+        raise ValueError("Unset JAX_CUDA_VISIBLE_DEVICES and select the allocation with CUDA_VISIBLE_DEVICES instead")
+    if os.environ.get("JAX_PLATFORM_NAME", "").strip().lower() == "cpu":
+        raise ValueError("Unset JAX_PLATFORM_NAME=cpu for GPU training")
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    import jax
 
-    Returns a list of (xml_path, fitness_score) tuples, or None on timeout.
+    try:
+        devices = jax.local_devices(backend="gpu")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "RoboMorph training requires a CUDA GPU. Install the cuda12 extra "
+            "and run on a GPU machine; see README.md."
+        ) from exc
+    if not devices:
+        raise RuntimeError("No CUDA GPUs are available for RoboMorph training")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    identifiers = visible.split(",") if visible is not None else [str(device.id) for device in devices]
+    return [identifier.strip() for identifier in identifiers[:len(devices)]]
+
+
+def train_multiple_models(xmls, *, timeout=MAX_BRAX_TRAINING_TIME, **kwargs):
+    """Evaluate XMLs with one spawned worker per visible GPU.
+
+    Return (xml_path, fitness) pairs. Raise on timeout or missing worker results;
+    individual training exceptions are saved with a traceback and scored -inf.
     """
     if not xmls:
         return []
-
-    logger = get_logger()
-    if not logger.handlers:
-        logger = log_to_stderr()
-    logger.setLevel(logging.WARNING)
-
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "False"
-
-    num_gpus = jax.device_count()
-    logger.warning(f"[Main] Detected {num_gpus} devices")
-    num_xmls = len(xmls)
-
-    xml_queue = Queue(maxsize=num_xmls)
-    for xml in xmls:
-        xml_queue.put(xml)
-
-    result_queue = Queue(maxsize=num_xmls)
-    queue_lock = Lock()
-
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    devices = gpu_ids()[:len(xmls)]
+    logger = logging.getLogger(__name__)
+    logger.info("Using %d GPU workers", len(devices))
+    context = multiprocessing.get_context("spawn")
+    xml_queue = context.Queue()
+    result_queue = context.Queue()
     processes = []
-    for gpu_idx in range(num_gpus):
-        proc = Process(
-            target=_process_task,
-            args=(xml_queue, result_queue, queue_lock, gpu_idx) + args,
-            kwargs=kwargs,
-        )
-        proc.start()
-        processes.append(proc)
-
-    logger.warning("[Main] All processes started")
-
     results = []
-    deadline = time.time() + MAX_BRAX_TRAINING_TIME
-    while len(results) < num_xmls and time.time() < deadline:
-        try:
-            result = result_queue.get(timeout=30.0)
-            results.append(result)
-            logger.warning(f"[Main] Got result ({len(results)}/{num_xmls}): {result}")
-        except queue.Empty:
-            alive = [p for p in processes if p.is_alive()]
-            if not alive:
-                logger.error(f"[Main] All workers dead, only got {len(results)}/{num_xmls} results")
-                break
+    deadline = time.monotonic() + timeout
 
-    if len(results) < num_xmls and time.time() >= deadline:
-        logger.error("[Main] Waiting for evaluation results timed out")
-        for proc in processes:
-            proc.terminate()
-        return None
+    try:
+        for xml in xmls:
+            xml_queue.put(xml)
+        # Queue.empty() is unreliable with multiprocessing's feeder thread.
+        # Explicit sentinels ensure every queued design is consumed exactly once.
+        for _ in devices:
+            xml_queue.put(None)
+        for device in devices:
+            process = context.Process(
+                target=_process_task,
+                args=(xml_queue, result_queue, device),
+                kwargs=kwargs,
+            )
+            process.start()
+            processes.append(process)
 
-    logger.warning("[Main] All xmls evaluated, joining processes")
+        while len(results) < len(xmls):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Training timed out after {timeout}s ({len(results)}/{len(xmls)} designs evaluated)")
+            try:
+                results.append(result_queue.get(timeout=min(1.0, remaining)))
+            except queue.Empty:
+                if not any(process.is_alive() for process in processes):
+                    raise RuntimeError(f"All training workers exited with only {len(results)}/{len(xmls)} results")
+        return results
+    finally:
+        # Always reap workers, including timeout and startup failure paths.
+        for process in processes:
+            process.join(timeout=max(0, min(1.0, deadline - time.monotonic())))
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+        for task_queue in (xml_queue, result_queue):
+            task_queue.cancel_join_thread()
+            task_queue.close()
 
-    # Only after everything from queue has been removed we can join processes
-    # https://docs.python.org/3/library/multiprocessing.html#all-start-methods
-    for proc in processes:
-        proc.join()
 
-    logger.warning("[Main] All processes joined")
-    return results
+def _process_task(xml_queue, result_queue, device, **kwargs):
+    """Set GPU visibility before importing the training stack in a fresh process."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    from train.train_brax import train_policy, ExperimentConfig, Hyperparameters
 
-
-def _process_task(xml_queue, result_queue, lock, gpu_idx, *args, **kwargs):
-    """Worker: train robot XMLs from the queue on a single GPU."""
-    logger = get_logger()
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_idx)
-    logger.warning(f"[P:{gpu_idx}] Process initialized")
-
+    logger = logging.getLogger(__name__)
     while True:
-        if not lock.acquire(timeout=30.0):
-            logger.error(f"[P:{gpu_idx}] Lock acquisition timed out")
+        xml = xml_queue.get()
+        if xml is None:
             return
-
-        if xml_queue.empty():
-            lock.release()
-            logger.warning(f"[P:{gpu_idx}] Queue empty, exiting")
-            return
-
-        try:
-            xml = xml_queue.get_nowait()
-            logger.warning(f"[P:{gpu_idx}] Got xml: {xml}, starting training")
-        except queue.Empty:
-            lock.release()
-            return
-
-        lock.release()
-
         try:
             result = train_policy(
-                ExperimentConfig(xml=xml, name=f'train_{xml}', **kwargs),
+                ExperimentConfig(xml=xml, name=Path(xml).stem, **kwargs),
                 Hyperparameters(),
             )
-        except Exception as e:
-            logger.error(f"[P:{gpu_idx}] Training failed: {e}")
-            result = -1
-
-        try:
-            result_queue.put((xml, result), timeout=30.0)
-        except Exception as e:
-            logger.error(f"[P:{gpu_idx}] Failed to put result in queue: {e}")
+            if not math.isfinite(result):
+                raise ValueError(f"Training returned nonfinite fitness: {result}")
+        except Exception as exc:
+            logger.exception("Training failed for %s on GPU %s", xml, device)
+            output_dir = Path(kwargs.get("output_dir", "runs"))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            failure_path = output_dir / f"failure_{Path(xml).stem}.json"
+            with failure_path.open("x") as file:
+                json.dump({"xml": str(xml), "error": str(exc), "traceback": traceback.format_exc()}, file, indent=2)
+            result = float("-inf")
+        result_queue.put((xml, result))

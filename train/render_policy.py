@@ -2,17 +2,14 @@ import pickle
 import sys
 from os.path import join
 
-import jax
-from brax.io import html, model
-from brax.training.acme import running_statistics
-from brax.training.agents.ppo import train as ppo
-import brax.training.agents.sac.networks as sac_net
-
-from train.envs import create_env
+from pathlib import Path
 
 
 def _collect_and_save_rollouts(env, inference_fn, run_folder_path, num_episodes=5, episode_length=1000):
     """Collect rollouts and save HTML render."""
+    import jax
+    from brax.io import html
+
     jit_env_reset = jax.jit(env.reset)
     jit_env_step = jax.jit(env.step)
     jit_inference_fn = jax.jit(inference_fn)
@@ -27,14 +24,23 @@ def _collect_and_save_rollouts(env, inference_fn, run_folder_path, num_episodes=
             state = jit_env_step(state, act)
     render = html.render(env.sys, rollouts)
     render_path = join(run_folder_path, "trained_render.html")
-    with open(render_path, "w") as f:
+    with open(render_path, "x") as f:
         f.write(render)
     print(f"Rendered rollouts saved to '{render_path}'")
     return render
 
 
 def render_from_path(run_folder_path):
-    """Load a trained policy from disk and render it."""
+    """Load a trained policy from disk and render it without training."""
+    output_path = Path(run_folder_path) / "trained_render.html"
+    if output_path.exists():
+        raise FileExistsError(f"Render already exists: {output_path}")
+
+    import jax
+    from brax.io import model
+    from brax.training.acme import running_statistics
+    from train.envs import create_env
+
     # Rendering with GPU acceleration enabled is very slow
     jax.config.update("jax_platform_name", "cpu")
 
@@ -48,8 +54,14 @@ def render_from_path(run_folder_path):
     env = create_env(args['env'], args['xml'])
 
     if 'algorithm' in args and args["algorithm"] == "ppo":
-        make_inference_fn, _, _ = ppo.train(environment=env, num_timesteps=0, episode_length=1000, normalize_observations=True)
+        from brax.training.agents.ppo import networks as ppo_net
+        networks = ppo_net.make_ppo_networks(
+            env.observation_size, env.action_size,
+            preprocess_observations_fn=running_statistics.normalize,
+        )
+        make_inference_fn = ppo_net.make_inference_fn(networks)
     else:
+        from brax.training.agents.sac import networks as sac_net
         networks = sac_net.make_sac_networks(env.observation_size, env.action_size, preprocess_observations_fn=running_statistics.normalize)
         make_inference_fn = sac_net.make_inference_fn(networks)
 

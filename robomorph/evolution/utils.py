@@ -17,15 +17,15 @@ def read_txt(file_path):
 
 def convert_dataset_to_zip(text):
     """Parse population file text into (structural, component, fitness) tuples."""
-    structural_pattern = re.compile(r'Structural: (.+)')
-    components_pattern = re.compile(r'Components: (.+)')
-    fitness_pattern = re.compile(r'Fitness: (-?[\d.]+)')
+    # Parse each complete record together so scientific notation and invalid
+    # records cannot shift fitness values onto a different design.
+    pattern = re.compile(
+        r"^Structural: (.+)\nComponents: (.+)\nFitness: ([^\n]+)",
+        re.MULTILINE,
+    )
+    return [(structure, components, float(fitness))
+            for structure, components, fitness in pattern.findall(text)]
 
-    structures = structural_pattern.findall(text)
-    components = components_pattern.findall(text)
-    fitness = [float(f) for f in fitness_pattern.findall(text)]
-
-    return list(zip(structures, components, fitness))
 
 
 def write_txt(file_path, dataset):
