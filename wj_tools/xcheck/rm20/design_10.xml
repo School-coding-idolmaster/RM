@@ -1,0 +1,125 @@
+<mujoco model="ant">
+  <compiler angle="degree" coordinate="local" inertiafromgeom="true" />
+  <option timestep="0.01" iterations="4" />
+  <custom>
+    <numeric data="1000" name="constraint_limit_stiffness" />
+    <numeric data="4000" name="constraint_stiffness" />
+    <numeric data="10" name="constraint_ang_damping" />
+    <numeric data="20" name="constraint_vel_damping" />
+    <numeric data="0.5" name="joint_scale_pos" />
+    <numeric data="0.2" name="joint_scale_ang" />
+    <numeric data="0.0" name="ang_damping" />
+    <numeric data="1" name="spring_mass_scale" />
+    <numeric data="1" name="spring_inertia_scale" />
+    <numeric data="15" name="solver_maxls" />
+  </custom>
+  <default>
+    <joint armature="1" />
+    <geom contype="1" conaffinity="0" condim="3" />
+  </default>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4" />
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2" />
+  </asset>
+  <worldbody>
+    <light cutoff="100" diffuse="1 1 1" dir="-0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular=".1 .1 .1" />
+    <geom type="plane" size="3 3 .01" material="grid" conaffinity="1" contype="0" />
+    <body name="torso" pos="0 0 0.75">
+      <camera name="track" mode="trackcom" pos="0 -3 0.3" xyaxes="1 0 0 0 0 1" />
+      <geom pos="0 0 0" size="0.04" type="capsule" fromto="0 0 0 0.15 0 0" rgba="0.2 0.6 0.8 1" />
+      <joint armature="0" damping="0" limited="false" margin="0.01" pos="0 0 0" type="free" />
+      <body pos="0.075 0.02 0" quat="0.7071067811865475 0.0 0.0 0.7071067811865475">
+        <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+        <body pos="0.1 0 0" quat="0.70710678118654750 0.0 0.70710678118654750 0.0">
+          <site type="cylinder" size=".021" fromto="0 0 -0.02 0 0 0.02" rgba="1 0.5 0.3 1" />
+          <joint name="j0" pos="0 0 0" axis="0 0 -1" range="0 180" ref="90.0" damping="0.1" />
+          <geom type="capsule" size="0.02" fromto="0 0 0 0.15 0 0" rgba="0.2 0.6 0.8 1" />
+          <geom type="box" size="0.021 0.021 0.021" pos="0.15 0 0" rgba="1 0.5 0.3 1" />
+          <geom type="capsule" size="0.02" fromto="0.15 0 0 0.25 0 0" rgba="0.2 0.6 0.8 1" />
+          <body pos="0.25 0 0" quat="0.70710678118654750 0.0 0.70710678118654750 0.0">
+            <site type="cylinder" size=".021" fromto="0 0 -0.02 0 0 0.02" rgba="1 0.5 0.3 1" />
+            <joint name="j1" pos="0 0 0" axis="0 0 -1" range="0 180" ref="171.0" damping="0.1" />
+            <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+          </body>
+        </body>
+      </body>
+      <body pos="0.075 -0.02 0" quat="0.7071067811865475 0.0 0.0 -0.7071067811865475">
+        <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+        <body pos="0.1 0 0" quat="0.70710678118654750 0.0 0.70710678118654750 0.0">
+          <site type="cylinder" size=".021" fromto="0 0 -0.02 0 0 0.02" rgba="1 0.5 0.3 1" />
+          <joint name="j2" pos="0 0 0" axis="0 0 1" range="0 180" ref="90.0" damping="0.1" />
+          <geom type="capsule" size="0.02" fromto="0 0 0 0.15 0 0" rgba="0.2 0.6 0.8 1" />
+          <geom type="box" size="0.021 0.021 0.021" pos="0.15 0 0" rgba="1 0.5 0.3 1" />
+          <geom type="capsule" size="0.02" fromto="0.15 0 0 0.25 0 0" rgba="0.2 0.6 0.8 1" />
+          <body pos="0.25 0 0" quat="0.70710678118654750 0.0 0.70710678118654750 0.0">
+            <site type="cylinder" size=".021" fromto="0 0 -0.02 0 0 0.02" rgba="1 0.5 0.3 1" />
+            <joint name="j3" pos="0 0 0" axis="0 0 1" range="0 180" ref="171.0" damping="0.1" />
+            <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+          </body>
+        </body>
+      </body>
+      <body>
+        <site type="box" size=".042 .042 .042" fromto="0.10999999999999999 0 0 0.19 0 0 " rgba="1 0.5 0.3 1" />
+        <geom pos="0 0 0" size="0.04" type="capsule" fromto="0.15 0 0 0.3 0 0" rgba="0.2 0.6 0.8 1" />
+        <body pos="0.22499999999999998 0.02 0" quat="0.7071067811865475 0.0 0.0 0.7071067811865475">
+          <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+          <geom type="box" size="0.021 0.021 0.021" pos="0.1 0 0" rgba="1 0.5 0.3 1" />
+          <geom type="capsule" size="0.02" fromto="0.1 0 0 0.25 0 0" rgba="0.2 0.6 0.8 1" />
+        </body>
+        <body pos="0.22499999999999998 -0.02 0" quat="0.7071067811865475 0.0 0.0 -0.7071067811865475">
+          <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+          <geom type="box" size="0.021 0.021 0.021" pos="0.1 0 0" rgba="1 0.5 0.3 1" />
+          <geom type="capsule" size="0.02" fromto="0.1 0 0 0.25 0 0" rgba="0.2 0.6 0.8 1" />
+        </body>
+        <body>
+          <site type="cylinder" size=".042" fromto="0.26 0 0 0.33999999999999997 0 0" rgba="0.15 0.55 0.15 1" />
+          <joint name="j4" pos="0.3 0.0 0" axis="1 0 0" range="-90 90" damping="0.1" />
+          <geom pos="0 0 0" size="0.04" type="capsule" fromto="0.3 0 0 0.44999999999999996 0 0" rgba="0.2 0.6 0.8 1" />
+          <body pos="0.375 0.02 0" quat="0.7071067811865475 0.0 0.0 0.7071067811865475">
+            <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+            <body>
+              <site type="cylinder" size="0.02" fromto="0.1 0 0.02 0.1 0 -0.02" rgba="0.15 0.55 0.15 1" />
+              <joint name="j5" pos="0.1 0 0" axis="0 0 1" range="-90 90" damping="0.1" />
+              <geom type="capsule" size="0.02" fromto="0.1 0 0 0.25 0 0" rgba="0.2 0.6 0.8 1" />
+              <body pos="0.26 0 0" quat="0.70710678118654750 0.0 0.70710678118654750 0.0">
+                <joint name="j6" />
+                <geom type="cylinder" size=".05 .01" rgba=".5 .5 1 1" />
+              </body>
+            </body>
+          </body>
+          <body pos="0.375 -0.02 0" quat="0.7071067811865475 0.0 0.0 -0.7071067811865475">
+            <geom type="capsule" size="0.02" fromto="0 0 0 0.1 0 0" rgba="0.2 0.6 0.8 1" />
+            <body>
+              <site type="cylinder" size="0.02" fromto="0.1 0 0.02 0.1 0 -0.02" rgba="0.15 0.55 0.15 1" />
+              <joint name="j7" pos="0.1 0 0" axis="0 0 -1" range="-90 90" damping="0.1" />
+              <geom type="capsule" size="0.02" fromto="0.1 0 0 0.25 0 0" rgba="0.2 0.6 0.8 1" />
+              <body pos="0.26 0 0" quat="0.70710678118654750 0.0 0.70710678118654750 0.0">
+                <joint name="j8" />
+                <geom type="cylinder" size=".05 .01" rgba=".5 .5 1 1" />
+              </body>
+            </body>
+          </body>
+          <body>
+            <site type="box" size=".042 .042 .042" fromto="0.41 0 0 0.48999999999999994 0 0 " rgba="1 0.5 0.3 1" />
+            <geom pos="0 0 0" size="0.04" type="capsule" fromto="0.44999999999999996 0 0 0.6 0 0" rgba="0.2 0.6 0.8 1" />
+            <body>
+              <geom type="cylinder" size=".042" fromto="0.6 0 0.04 0.6 0 -0.04" rgba="0.15 0.55 0.15 1" />
+              <joint name="j9" pos="0.6 0.0 0" axis="0 0 1" range="-90 90" />
+              <geom pos="0 0 0" size="0.04" type="capsule" fromto="0.6 0 0 0.75 0 0" rgba="0.2 0.6 0.8 1" />
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor joint="j0" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j1" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j2" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j3" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j4" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j5" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j7" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+    <motor joint="j9" ctrllimited="true" ctrlrange="-1.0 1.0" gear="50" />
+  </actuator>
+</mujoco>
