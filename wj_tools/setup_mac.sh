@@ -45,7 +45,7 @@ if ! grep -q 'UV_PROJECT_ENVIRONMENT' "$HOME/.zshrc" 2>/dev/null; then
 fi
 
 say "3/6 Python（与 WSL 同一个补丁版本）"
-[ -f "$REF" ] || { echo "缺少 $REF（WSL 端定版时生成并提交）"; exit 1; }
+[ -f "$REF" ] || { echo "缺少 ${REF}（WSL 端定版时生成并提交）"; exit 1; }
 PYVER=$(sed -n 's/^ *"python": *"\([0-9.]*\)".*/\1/p' "$REF" | head -1)
 echo "WSL 的 Python：$PYVER"
 uv python install "$PYVER"

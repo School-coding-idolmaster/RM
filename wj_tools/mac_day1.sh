@@ -19,7 +19,7 @@ fi
 for s in 0 1; do
   out="$RUNS/xcheck_s$s"
   [ -f "$out/DONE" ] && continue
-  echo "=== $((s + 2))/3 一致性检验 种子 $s（20 个设计 × 3 回合，与 Windows run4_it20 同一设置）"
+  echo "=== $((s + 2))/3 一致性检验 种子 ${s}（20 个设计 × 3 回合，与 Windows run4_it20 同一设置）"
   run python wj_tools/run_meta.py start "$out" --threads 12 --note "xcheck seed $s (run4_it20 settings)"
   run python -m mpc.eval_batch --xml_dir wj_tools/xcheck/rm20 --out "$out" --episodes 3 --seed $s \
       --threads 12 --steps 250 --samples 64 --fall_penalty 100 --noise_warm 0.5 --noise_hist 0.1 \
