@@ -41,7 +41,22 @@ def build_parser():
     parser.add_argument("--timesteps", type=positive_int, default=1_000_000, help="Training timesteps per model")
     parser.add_argument("--top_k", type=positive_int, default=3, help="Top-k designs for few-shot examples")
     parser.add_argument("--no_log", action="store_true", help="Disable Weights & Biases logging")
+    parser.add_argument("--evaluator", choices=["sac", "mpc"], default="sac",
+                        help="sac: train SAC per design (GPU); mpc: CPU MPPI (mpc/)")
+    parser.add_argument("--mpc_episodes", type=positive_int, default=None,
+                        help="MPC episodes per design (default: 3 for --domain rm, 2 for --domain hyblock)")
+    parser.add_argument("--mpc_threads", type=positive_int, default=8, help="threads for MPC rollouts")
+    parser.add_argument("--domain", choices=["rm", "hyblock"], default="rm",
+                        help="rm: RoboMorph parts (original); hyblock: Hyblock parts (hyblock/), MPC only")
+    parser.add_argument("--max_modules", type=positive_int, default=6, help="hyblock: module limit per design")
+    parser.add_argument("--terrain_scale", type=float, default=1.0, help="terrain length scale (hyblock domain)")
     return parser
+
+
+def default_mpc_episodes(domain):
+    """RM domain: 3 episodes (weeks 3-4). Hyblock domain: 2 (week 5-6 calibration: ranking with 2 episodes
+    matches 3 episodes at Spearman 0.98-0.99, saving a third of the MPC budget)."""
+    return 2 if domain == "hyblock" else 3
 
 
 def run_artifacts(results_path, exp_name):
@@ -52,6 +67,7 @@ def run_artifacts(results_path, exp_name):
         directory / f"arguments_{exp_name}.json",
         directory / f"environment_{exp_name}.json",
         directory / f"time_elapse_{exp_name}.csv",
+        directory / f"usage_{exp_name}.csv",
         directory / f"population_{exp_name}.txt",
         directory / f"examples_{exp_name}",
         directory / f"runs_{exp_name}",
@@ -62,7 +78,11 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     load_dotenv(dotenv_path=Path.cwd() / ".env")
-    if not os.environ.get("OPENAI_API_KEY") or os.environ["OPENAI_API_KEY"] == "your-openai-api-key-here":
+    use_anthropic = os.environ.get("LLM_PROVIDER", "openai").strip().lower() == "anthropic"
+    if use_anthropic:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            parser.error("LLM_PROVIDER=anthropic: set ANTHROPIC_API_KEY in the environment or .env")
+    elif not os.environ.get("OPENAI_API_KEY") or os.environ["OPENAI_API_KEY"] == "your-openai-api-key-here":
         parser.error("set OPENAI_API_KEY in the environment or .env before starting evolution")
 
     if args.results_path is None:
@@ -79,14 +99,19 @@ def main():
     from robomorph.evolution.utils import read_txt, prompts_path
     from train.parallel_train import gpu_ids
 
-    gpu_ids()  # Fail before consuming LLM tokens when GPU training is unavailable.
+    if args.domain == "hyblock" and args.evaluator != "mpc":
+        parser.error("--domain hyblock requires --evaluator mpc")
+    if args.mpc_episodes is None:
+        args.mpc_episodes = default_mpc_episodes(args.domain)
+    if args.evaluator == "sac":
+        gpu_ids()  # Fail before consuming LLM tokens when GPU training is unavailable.
     if args.problem is None:
         args.problem = read_txt(prompts_path("user.txt"))
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
     )
     logger = logging.getLogger(__name__)
-    client = OpenAI()
+    client = None if use_anthropic else OpenAI()
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -114,6 +139,12 @@ def main():
         timesteps=args.timesteps,
         top_k=args.top_k,
         log=not args.no_log,
+        evaluator=args.evaluator,
+        mpc_episodes=args.mpc_episodes,
+        mpc_threads=args.mpc_threads,
+        domain=args.domain,
+        max_modules=args.max_modules,
+        terrain_scale=args.terrain_scale,
     )
 
     best_unit = max(population.units, key=lambda u: u.fitness)

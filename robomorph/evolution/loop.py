@@ -9,6 +9,7 @@ from typing import List
 
 from openai import OpenAI
 
+from robomorph.evolution import llm
 from robomorph.evolution.population import EvolutionUnit, Population
 from robomorph.evolution.utils import (
     read_txt, write_txt, convert_dataset_to_zip,
@@ -64,6 +65,12 @@ def run_for_n(
     timesteps: int = 1_000_000,
     top_k: int = 3,
     log: bool = True,
+    evaluator: str = "sac",
+    mpc_episodes: int = 3,
+    mpc_threads: int = 8,
+    domain: str = "rm",
+    max_modules: int = 6,
+    terrain_scale: float = 1.0,
 ):
     """Run the genetic algorithm for n generations."""
     results_dir = os.path.dirname(results_path)
@@ -75,6 +82,9 @@ def run_for_n(
     with open(time_elapse_path, "x", newline="") as f:
         writer = csv.writer(f, delimiter=";")
         writer.writerow(["generation", "time_seconds"])
+    usage_path = os.path.join(results_dir, f"usage_{exp_name}.csv") if results_dir else f"usage_{exp_name}.csv"
+    with open(usage_path, "x", newline="") as f:
+        csv.writer(f, delimiter=";").writerow(["generation", "llm_calls", "input_tokens", "output_tokens"])
 
     for generation in range(num_generations):
         start_time = time.time()
@@ -83,6 +93,8 @@ def run_for_n(
         _evaluate_fitness(
             exp_name, generation, population, client, terrain, model_name,
             results_path=results_path, seed=seed, timesteps=timesteps, top_k=top_k, log=log,
+            evaluator=evaluator, mpc_episodes=mpc_episodes, mpc_threads=mpc_threads,
+            domain=domain, max_modules=max_modules, terrain_scale=terrain_scale,
         )
 
         # Selection step: keep top designs
@@ -94,6 +106,9 @@ def run_for_n(
         with open(time_elapse_path, "a", newline="") as f:
             writer = csv.writer(f, delimiter=";")
             writer.writerow([generation, f"{elapsed:.2f}"])
+        with open(usage_path, "a", newline="") as f:  # cumulative totals
+            csv.writer(f, delimiter=";").writerow(
+                [generation, llm.USAGE["calls"], llm.USAGE["input_tokens"], llm.USAGE["output_tokens"]])
 
         with open(results_path, "a", newline="") as f:
             writer = csv.writer(f, delimiter=";")
@@ -119,14 +134,10 @@ def run_for_n(
 
 def generate_grammar(client: OpenAI, system_prompt: str, user_prompt: str, model_name: str):
     """Prompt the LLM with the robot grammar and return the raw response."""
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    content = response.choices[0].message.content
+    if llm.provider() == "anthropic":
+        content = llm.anthropic_chat(system_prompt, user_prompt, model_name)
+    else:
+        content = llm.openai_chat(client, system_prompt, user_prompt, model_name)
     if not content:
         raise ValueError("LLM returned an empty design response")
     return content
@@ -165,6 +176,12 @@ def _evaluate_fitness(
     timesteps: int = 1_000_000,
     top_k: int = 3,
     log: bool = True,
+    evaluator: str = "sac",
+    mpc_episodes: int = 3,
+    mpc_threads: int = 8,
+    domain: str = "rm",
+    max_modules: int = 6,
+    terrain_scale: float = 1.0,
 ) -> Population:
     """Evaluate fitness: LLM design -> compile -> train -> update population."""
     logger.info("Starting fitness evaluation...")
@@ -177,7 +194,13 @@ def _evaluate_fitness(
     population_file = os.path.join(results_dir, f"population_{exp_name}.txt")
     curr_population = read_txt(population_file) if os.path.exists(population_file) else ""
 
-    grammar_system = read_txt(prompts_path("grammar.txt"))
+    if domain == "hyblock":
+        from hyblock import llm_io as hyblock_io
+        grammar_system = hyblock_io.system_prompt(max_modules)
+    elif domain == "rm":
+        grammar_system = read_txt(prompts_path("grammar.txt"))
+    else:
+        raise ValueError(f"Unknown domain: {domain}")
 
     current_elite = None
     xml_paths = []
@@ -203,9 +226,32 @@ def _evaluate_fitness(
         response_path = os.path.join(xml_exp_dir, f"evo{generation}_unit{i}.txt")
         with open(response_path, "x") as f:
             f.write(grammar)
+        diversity = None
+        if domain == "hyblock":
+            structural_graph = hyblock_io.extract_rules(grammar)
+            component_graph = hyblock_io.extract_design(grammar)
+            if component_graph is not None:
+                diversity = hyblock_io.diversity(component_graph)
+                logger.info(f"unit{i}: {component_graph}")
+                try:
+                    robot_xml = hyblock_io.compile_text(component_graph, max_modules)
+                    xml_path = os.path.join(xml_exp_dir, f"evo{generation}_unit{i}.xml")
+                    with open(xml_path, "x") as f:
+                        f.write(robot_xml)
+                    xml_paths.append(xml_path)
+                    unit.xml_path = xml_path
+                except ValueError as e:     # hyblock.design.DesignError (kind in the message)
+                    unit.error = f"Invalid design: {e}"
+                    logger.warning("Invalid design for unit %d: %s", i, e)
+            else:
+                unit.error = "LLM response has no DESIGN line"
+            unit.structure = structural_graph
+            unit.components = component_graph
+            unit.diversity = diversity
+            continue
+
         structural_graph = extract_last_step(grammar)
         component_graph = extract_bracket_line(grammar)
-        diversity = None
 
         if component_graph is not None:
             diversity = design_score(structural_graph, component_graph)
@@ -234,15 +280,29 @@ def _evaluate_fitness(
     if not xml_paths:
         raise RuntimeError(f"Generation {generation} produced no trainable designs; inspect the LLM responses and compiler warnings")
 
-    # Train multiple models in parallel
-    results = train_multiple_models(
-        xml_paths,
-        terrain=terrain,
-        timesteps=timesteps,
-        seed=seed,
-        log=log,
-        output_dir=os.path.join(results_dir, f"runs_{exp_name}"),
-    )
+    # Evaluate the designs: SAC training (original RoboMorph) or CPU MPPI (mpc/)
+    if evaluator == "sac":
+        results = train_multiple_models(
+            xml_paths,
+            terrain=terrain,
+            timesteps=timesteps,
+            seed=seed,
+            log=log,
+            output_dir=os.path.join(results_dir, f"runs_{exp_name}"),
+        )
+    elif evaluator == "mpc":
+        from mpc.evaluate import evaluate_multiple_designs
+        results = evaluate_multiple_designs(
+            xml_paths,
+            terrain=terrain,
+            seed=seed,
+            episodes=mpc_episodes,
+            threads=mpc_threads,
+            output_dir=os.path.join(results_dir, f"runs_{exp_name}"),
+            terrain_scale=terrain_scale,
+        )
+    else:
+        raise ValueError(f"Unknown evaluator: {evaluator}")
     results_dict = dict(results)
 
     for unit in population.units:
