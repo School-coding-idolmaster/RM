@@ -11,7 +11,7 @@ git commit -q -F - <<EOF2
 $MSG
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01RX18SzeAwMGxthrFetEU8H
+Claude-Session: https://claude.ai/code/session_01WsF45YbqGH6z1n3ju9Ehb8
 EOF2
 fi
 git push wj wj-main && git log --oneline -1

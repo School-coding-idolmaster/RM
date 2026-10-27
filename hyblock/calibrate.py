@@ -5,6 +5,7 @@
 阶段 B（地形）：阶段 A 里平地上能走的设计（3 回合平均位移 ≥ 1 m），在沟坎 / 横梁 × 缩放 {1.5, 2, 3} 上各 1 回合，
   记录最远位移。走不动的设计记为通不过（平地都走不了，地形更走不了）。
 中断后重跑会跳过已完成的行。最后写 summary.txt。
+第 7 周补测（Mac）：--scales 1.0,1.25,1.5,2,3 --n 120 在同一台机器上把五个比例一起重测（summary 按 terrain.csv 里出现的比例汇总）。
 
 用法（WSL，在 D:\\RM\\robomorph 下）：
     uv run --locked python -m hyblock.calibrate --out ../hyblock_runs/calib --n 60
@@ -89,14 +90,14 @@ def phase_a(out: Path, items, episodes: int, threads: int, seed: int, steps: int
               f"dist={row['distance_m']:.2f} m term={row['terminated']} {row['seconds']:.0f}s", flush=True)
 
 
-def phase_b(out: Path, threads: int, seed: int, steps: int) -> None:
+def phase_b(out: Path, threads: int, seed: int, steps: int, scales=SCALES) -> None:
     flat = _read(out / "flat.csv")
     walkers = [r for r in flat if float(r["distance_m"]) >= WALK_M]
     path = out / "terrain.csv"
     done = {(r["name"], r["terrain"], r["scale"]) for r in _read(path)}
     for r in walkers:
         for terrain in TERRAINS:
-            for scale in SCALES:
+            for scale in scales:
                 key = (r["name"], terrain, f"{scale}")
                 if key in done:
                     continue
@@ -166,13 +167,14 @@ def write_summary(out: Path) -> str:
                 lines.append(f"  关节数 {lo}–{hi}：完整回合 {sec_ep[m].mean():.1f} s（{m.sum()} 个设计）")
         uns = sum(int(r["unstable"]) for r in flat)
         lines.append(f"  物理故障（unstable）回合数：{uns}")
+    scales = sorted({float(t["scale"]) for t in terr}) if terr else []
     if terr:
         lines += ["", "== 地形：通过第一个障碍的比例（分母 = 全部随机设计，平地走不动的算不通过）=="]
         for cap in CAPS:
             n_all = len([r for r in rnd if int(r["modules"]) <= cap])
             for terrain in TERRAINS:
                 parts = []
-                for scale in SCALES:
+                for scale in scales:
                     rows = [t for t in terr if t["terrain"] == terrain and t["scale"] == f"{scale}"
                             and t["name"].startswith("rand_") and int(t["modules"]) <= cap]
                     passed = sum(int(t["passed"]) for t in rows)
@@ -198,6 +200,8 @@ def main():
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--steps", type=int, default=250, help="control steps per episode")
     p.add_argument("--phase", choices=["A", "B", "all"], default="all")
+    p.add_argument("--scales", default=",".join(str(s) for s in SCALES),
+                   help="comma-separated terrain scales for phase B, e.g. 1.0,1.25,1.5,2,3")
     p.add_argument("--summary_only", action="store_true")
     a = p.parse_args()
     out = Path(a.out)
@@ -209,7 +213,7 @@ def main():
             phase_a(out, items, a.episodes, a.threads, a.mpc_seed, a.steps)
             print(write_summary(out), flush=True)
         if a.phase in ("B", "all"):
-            phase_b(out, a.threads, a.mpc_seed, a.steps)
+            phase_b(out, a.threads, a.mpc_seed, a.steps, tuple(float(x) for x in a.scales.split(",")))
     print(write_summary(out))
 
 
