@@ -30,6 +30,11 @@ def _record(inp, out):
 
 
 def anthropic_chat(system_prompt: str, user_prompt: str, model_name: str, retries: int = 5) -> str:
+    return anthropic_chat_full(system_prompt, user_prompt, model_name, retries)[0]
+
+
+def anthropic_chat_full(system_prompt: str, user_prompt: str, model_name: str, retries: int = 5) -> tuple[str, dict]:
+    """Same as anthropic_chat, also returns this call's usage (thread-safe per call; hyblock/search.py)."""
     import httpx
     body = {
         "model": model_name,
@@ -53,7 +58,10 @@ def anthropic_chat(system_prompt: str, user_prompt: str, model_name: str, retrie
         data = r.json()
         usage = data.get("usage", {})
         _record(usage.get("input_tokens"), usage.get("output_tokens"))
-        return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        return text, {"input_tokens": int(usage.get("input_tokens") or 0),
+                      "output_tokens": int(usage.get("output_tokens") or 0),
+                      "model": data.get("model", model_name), "stop_reason": data.get("stop_reason")}
     raise RuntimeError("Claude API: retries exhausted")
 
 

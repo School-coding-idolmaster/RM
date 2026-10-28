@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 
 from hyblock.design import (DEFAULT_Q, MIRROR_PORTS, PORTS, ROLLS, Design, DesignError, PartDecl, build_robot,
                             mirror_port)
@@ -200,3 +201,78 @@ def mutate(d: Design, rng: random.Random | int | None = None, max_modules: int =
         if out is not None and _valid(out, spec, max_modules):
             return out, name
     return d.copy(), "none"
+
+
+# ---------------------------------------------------------------- 交叉（进化算法用，第 8 周）
+
+def _subtree(d: Design, name: str) -> list[str]:
+    """name 及其全部后代（声明顺序）。"""
+    out, frontier = [], {name}
+    for p in d.parts:                                   # parts are in parent-before-child order
+        if p.name in frontier or p.parent in frontier:
+            frontier.add(p.name)
+            out.append(p.name)
+    return out
+
+
+def _graft(a: Design, b: Design, b_root: str, parent: str, port: str, rng: random.Random) -> Design:
+    """把 b 中以 b_root 为根的子树（含其上的脚）接到 a 的 parent.port 上；零件改名避免冲突。"""
+    out = a.copy()
+    names = _subtree(b, b_root)
+    k = max([int(p.name[1:]) for p in out.parts] + [-1]) + 1      # part numbers are unique across m/h
+    rename = {}
+    for n in names:
+        rename[n] = f"{n[0]}{k}"
+        k += 1
+    kinds = {p.name: p.kind for p in out.parts}
+    for p in b.parts:
+        if p.name not in rename:
+            continue
+        q = replace(p)
+        q.name = rename[p.name]
+        if p.name == b_root:
+            q.parent, q.parent_port = parent, port
+            q.roll = p.roll if rng.random() < 0.5 else rng.choice(ROLLS)
+            q.mirror = bool(p.mirror and kinds.get(parent) == "hub" and port in MIRROR_PORTS)
+        else:
+            q.parent = rename[p.parent]
+        out.parts.append(q)
+    out.feet += [(rename[n], port_) for n, port_ in b.feet if n in rename]
+    return out
+
+
+def _remove_subtree(d: Design, name: str) -> Design:
+    gone = set(_subtree(d, name))
+    out = d.copy()
+    out.parts = [p for p in out.parts if p.name not in gone]
+    out.feet = [(n, port) for n, port in out.feet if n not in gone]
+    return out
+
+
+def crossover(a: Design, b: Design, rng: random.Random | int | None = None, max_modules: int = 6,
+              spec: ModuleSpec | None = None, max_tries: int = 30) -> Design | None:
+    """子树交换：从 a 去掉一棵随机子树（a 只有根时不去），在原位置（或 a 的随机空闲口）接上 b 的一棵随机子树。
+    结果必须合法（含模块数上限、自碰撞），否则重试；都不行返回 None。"""
+    spec = spec or load_spec()
+    rng = rng if isinstance(rng, random.Random) else random.Random(rng)
+    b_cands = [p.name for p in b.parts if p.parent is not None]
+    if not b_cands:
+        return None
+    for _ in range(max_tries):
+        b_root = rng.choice(b_cands)
+        a_cands = [p for p in a.parts if p.parent is not None]
+        if a_cands and rng.random() < 0.8:
+            victim = rng.choice(a_cands)
+            base = _remove_subtree(a, victim.name)
+            parent, port = victim.parent, victim.parent_port   # a mirrored victim frees both faces
+        else:
+            base = a.copy()
+            holders = [p for p in base.parts if free_ports(base, p.name)]
+            if not holders:
+                continue
+            h = rng.choice(holders)
+            parent, port = h.name, rng.choice(free_ports(base, h.name))
+        child = _graft(base, b, b_root, parent, port, rng)
+        if _valid(child, spec, max_modules):
+            return child
+    return None
