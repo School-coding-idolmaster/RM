@@ -69,7 +69,7 @@ def run_for_n(
     mpc_episodes: int = 3,
     mpc_threads: int = 8,
     domain: str = "rm",
-    max_modules: int = 6,
+    max_modules: int = 8,
     terrain_scale: float = 1.0,
 ):
     """Run the genetic algorithm for n generations."""
@@ -180,7 +180,7 @@ def _evaluate_fitness(
     mpc_episodes: int = 3,
     mpc_threads: int = 8,
     domain: str = "rm",
-    max_modules: int = 6,
+    max_modules: int = 8,
     terrain_scale: float = 1.0,
 ) -> Population:
     """Evaluate fitness: LLM design -> compile -> train -> update population."""

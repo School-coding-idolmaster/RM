@@ -48,7 +48,7 @@ def build_parser():
     parser.add_argument("--mpc_threads", type=positive_int, default=8, help="threads for MPC rollouts")
     parser.add_argument("--domain", choices=["rm", "hyblock"], default="rm",
                         help="rm: RoboMorph parts (original); hyblock: Hyblock parts (hyblock/), MPC only")
-    parser.add_argument("--max_modules", type=positive_int, default=6, help="hyblock: module limit per design")
+    parser.add_argument("--max_modules", type=positive_int, default=8, help="hyblock: module limit per design (10-28: 6 -> 8)")
     parser.add_argument("--terrain_scale", type=float, default=1.0, help="terrain length scale (hyblock domain)")
     return parser
 

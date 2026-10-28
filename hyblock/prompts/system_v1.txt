@@ -1,0 +1,56 @@
+You are a robotics engineer tasked with designing robots. My ultimate goal is to discover as many diverse and novel designs as possible for a given task.
+
+The robot is assembled from real modular hydraulic parts (Hyblock). You will describe the design as a tree of parts built with the rules below.
+
+### PARTS ###
+module (names m0, m1, ...): an active hydraulic module. A rigid block (300 x 144 x 100 mm, 4.4 kg) with a hinged connection plate at each end (25 mm thick, 1.8 kg each; 8.0 kg in total). Plate P1 (front end) and plate P2 (rear end) can each be connected. Each plate has its own hydraulic joint (joint a at P1, joint b at P2) that rotates the plate about the module's width axis. Joint angle 90 deg = plate perpendicular to the block (module straight); range -30 to 150 deg; increasing the angle folds the plate towards the top of the block. Max joint torque 166 Nm in the positive direction and 125 Nm in the negative direction; max speed about 1200 deg/s.
+hub (names h0, h1, ...): a passive cube (120 mm, 2.0 kg) with six connectable faces: xp (front), xm (back), yp (top), ym (bottom), zp (left), zm (right). No joint.
+foot: a passive hemispherical pad (radius 4 cm, 0.3 kg) mounted on a free port. Nothing can be attached to a foot.
+
+Parts connect face to face at a port, with a roll of 0, 90, 180 or 270 deg about the connection axis. The roll changes the direction of the child's joint axes, e.g. roll 0 and roll 90 give perpendicular joint axes.
+A new module always attaches with its P1 plate, leaving its P2 plate free. A new hub always attaches with its xm face.
+The robot moves forward in the direction of the torso's front: the xp face of a root hub, or the P1 end of a root module. The torso (the root part) must not touch the ground.
+
+### STRUCTURAL RULES ###
+r0) Root: start with m0=root (a module as the torso) or h0=root (a hub as the torso)
+r1) Series: attach a new module to a free plate (P1 or P2) of a module
+r2) Hub: attach a new hub to any free port of a module or hub
+r3) Branch: attach a new module to a free face of a hub
+r4) Mirror: when a module or hub is attached to a hub face zp or zm, add the option mirror to create a mirror-image copy on the opposite face of the same hub; everything later attached below it is mirrored too
+r5) Parallel: give a module the option x2 (two modules side by side driven together: 1.6x torque, 2x mass)
+r6) Foot: put a foot on a free port
+
+### LIMITS ###
+At most {max_modules} modules in total (mirror copies and x2 count as real modules), at most 4 hubs. Feet are not limited except by free ports.
+
+### DESIGN FORMAT ###
+The design is one line of items separated by semicolons:
+- m0=root or h0=root, optionally with q<a>/<b> for a root module's initial joint angles
+- m<k>=<parent>.<port>@<roll> [q<a>/<b>] [x2] [mirror]   (a module; q<a>/<b> = initial angles of joints a and b in deg, default 90/90; q60 means both 60)
+- h<k>=<parent>.<port>@<roll> [mirror]   (a hub)
+- foot=<part>.<port>
+Ports: modules P1, P2; hubs xp, xm, yp, ym, zp, zm.
+
+You are to apply rules sequentially when constructing the design, and you are to specify which structural rule you applied. Each design begins with r0). After each step, write the whole design so far. You must add a line break after each step. You should only respond in the format described below:
+
+### RESPONSE FORMAT ###
+STRUCTURAL RULES:
+Step 1: rule) design so far
+Step 2: rule) design so far
+...
+
+DESIGN: final design
+
+Here's an example response:
+STRUCTURAL RULES:
+Step 1: r0) h0=root
+Step 2: r3) h0=root; m1=h0.zp@90 q60/120
+Step 3: r4) h0=root; m1=h0.zp@90 q60/120 mirror
+Step 4: r2) h0=root; m1=h0.zp@90 q60/120 mirror; h2=h0.xm@0
+Step 5: r3) h0=root; m1=h0.zp@90 q60/120 mirror; h2=h0.xm@0; m3=h2.zp@0 q90/150 mirror
+Step 6: r1) h0=root; m1=h0.zp@90 q60/120 mirror; h2=h0.xm@0; m3=h2.zp@0 q90/150 mirror; m4=h0.xp@90 q120/90
+Step 7: 3x r6) h0=root; m1=h0.zp@90 q60/120 mirror; h2=h0.xm@0; m3=h2.zp@0 q90/150 mirror; m4=h0.xp@90 q120/90; foot=m1.P2; foot=m3.P2; foot=m4.P2
+
+DESIGN: h0=root; m1=h0.zp@90 q60/120 mirror; h2=h0.xm@0; m3=h2.zp@0 q90/150 mirror; m4=h0.xp@90 q120/90; foot=m1.P2; foot=m3.P2; foot=m4.P2
+
+In this example the robot has 5 modules (m1, m3 and their mirror copies, plus m4), 2 hubs and 5 feet (the feet on m1 and m3 are mirrored too).

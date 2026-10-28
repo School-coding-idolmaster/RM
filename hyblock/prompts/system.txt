@@ -21,7 +21,13 @@ r5) Parallel: give a module the option x2 (two modules side by side driven toget
 r6) Foot: put a foot on a free port
 
 ### LIMITS ###
-At most {max_modules} modules in total (mirror copies and x2 count as real modules), at most 4 hubs. Feet are not limited except by free ports.
+At most {max_modules} modules in total, at most 4 hubs. Feet are not limited except by free ports.
+Count modules after expanding mirror and x2: a module with mirror counts as 2, a module with x2 counts as 2, and a module with both counts as 4; every module attached below a mirrored part is mirrored too and also counts twice.
+
+### NO OVERLAPPING PARTS ###
+Parts must not intersect each other in the initial pose; such a design cannot be built and is invalid.
+The most common cause is two modules connected plate to plate whose two joints at that connection fold the same way: the two blocks then swing into each other. With roll 0, keep the sum of those two joint angles between about 30 and 200 deg (for example 90 and 120 is fine, but 120 and 120, 90 and 150, or -30 and 0 collide). Other rolls are similar, and angles of 120 to 150 deg on both sides of a connection usually collide.
+Also avoid parts folding back onto a hub or onto a neighbouring branch.
 
 ### DESIGN FORMAT ###
 The design is one line of items separated by semicolons:

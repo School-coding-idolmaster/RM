@@ -84,4 +84,4 @@ tiers:
   mass_scale: [0.75, 1.0, 1.5]           # [假设]
   parallel_eta: [1.0, 0.8]               # [假设]
   max_speed_deg_s: [370.0, 1185.0]       # 见 actuator.max_speed_deg_s
-  max_modules: 6                         # [假设] 候选 4 / 6 / 8，按随机设计的可走比例定
+  max_modules: 8                         # 10-28 WJ 决定 6 → 8（新物理下随机设计能走 0.62；8 模块设计 MPC 约 38 s/2 回合）

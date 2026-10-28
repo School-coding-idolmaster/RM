@@ -143,7 +143,7 @@ def static_utilization(design_text: str, max_modules: int | None) -> float:
     return float(np.max(robot.check(robot.q0())["utilization"])) if robot.n_joints else 0.0
 
 
-def screen(design_text: str, cfg: ScreenConfig = ScreenConfig(), max_modules: int | None = 6,
+def screen(design_text: str, cfg: ScreenConfig = ScreenConfig(), max_modules: int | None = 8,
            xml: str | None = None) -> ScreenResult:
     """筛选一个设计。xml 给定时跳过编译（但合法性检查要求 design_text 仍能解析）。"""
     met: dict = {}

@@ -1,7 +1,8 @@
 """Hyblock 域的搜索驱动（第 8 周）：随机搜索、进化算法、RM 式 LLM 循环共用一套评估、预算、日志与续跑。
 
 每一代提出 --batch 个候选 → 合法性（含自碰撞）→ ① 筛选 → ③ MPC（每设计 --episodes 回合）。
-**预算 = MPC 次数**：无效设计、被 ① 淘汰的设计、与已评估设计完全相同的设计（直接沿用旧分数）都不占预算。
+**预算 = 评估次数** = 跑了 MPC 的设计 + 与已评估设计完全相同的设计（10-28 WJ 决定：与 RM 原版一致，RM 对每个候选都
+评估，重复也花一次评估；这里沿用旧分数、不重跑 MPC）。无效设计、被 ① 淘汰的设计不占预算。summary 另报不同设计数。
 预算用完即停（--max_gens 防止 LLM 一直给无效设计时死循环）。
 
 方法
@@ -45,7 +46,8 @@ FIELDS = ["gen", "idx", "method", "source", "parents", "design", "status", "kind
           "joints", "feet", "root", "n_mpc", "best_so_far", "screen_s", "mpc_s", "llm_in", "llm_out",
           "llm_s", "rules", "time"]
 # status: mpc（跑了 MPC，占预算）| invalid（DesignError；kind = 原因）| screened（① 淘汰；kind = 原因）
-#         | duplicate（与已评估设计相同，沿用分数，不占预算）| no_design（LLM 回复里没有 DESIGN 行）
+#         | duplicate（与已评估设计相同，沿用分数，占预算）| no_design（LLM 回复里没有 DESIGN 行）
+# n_mpc 列 = 到这一行为止用掉的评估次数（mpc + duplicate）
 
 
 # ---------------------------------------------------------------- 记录
@@ -75,7 +77,8 @@ class Log:
         return [r for r in self.rows if r["status"] == "mpc" and (before_gen is None or int(r["gen"]) < before_gen)]
 
     def n_mpc(self) -> int:
-        return sum(r["status"] == "mpc" for r in self.rows)
+        """评估次数（占预算）：mpc + duplicate。"""
+        return sum(r["status"] in ("mpc", "duplicate") for r in self.rows)
 
     def score_of(self, text: str) -> float | None:
         for r in self.rows:
@@ -223,7 +226,7 @@ def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg:
     row["design"] = text
     old = log.score_of(text)
     if old is not None:
-        row.update(status="duplicate", fitness=old, n_mpc=log.n_mpc(), best_so_far=log.best())
+        row.update(status="duplicate", fitness=old, n_mpc=log.n_mpc() + 1, best_so_far=log.best())
         log.add(row)
         return
     t0 = time.time()
@@ -253,7 +256,7 @@ def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg:
                terminated=sum(e["terminated"] for e in eps), env_steps=json.dumps([e["env_steps"] for e in eps]),
                peak_speed=json.dumps(pc["peak_speed"]), fast_episodes=pc["fast_episodes"],
                mpc_s=round(time.time() - t1, 2))
-    best = max(log.best(), r["fitness"]) if log.n_mpc() else r["fitness"]
+    best = max(log.best(), r["fitness"]) if log.scored() else r["fitness"]
     row.update(n_mpc=log.n_mpc() + 1, best_so_far=round(best, 3))
     log.add(row)
 
@@ -295,6 +298,7 @@ def run(a, out: Path) -> Log:
 def write_summary(out: Path, a, log: Log) -> str:
     rows = log.rows
     mpc = [r for r in rows if r["status"] == "mpc"]
+    used = [r for r in rows if r["status"] in ("mpc", "duplicate")]       # budget order
     L = [f"Hyblock 搜索（{time.strftime('%Y-%m-%d %H:%M')}）：{a.method}，种子 {a.seed}，预算 {a.budget} 次 MPC，"
          f"每代 {a.batch}，{a.terrain} ×{a.terrain_scale}，每设计 {a.episodes} 回合，筛选 {a.screen}（{SCREEN_VERSION}）"]
     if a.method == "llm":
@@ -302,6 +306,8 @@ def write_summary(out: Path, a, log: Log) -> str:
     if a.method == "ga":
         L.append(f"GA：pop {a.pop}，锦标赛 {a.tournament}，p_cross {a.p_cross}，p_mut {a.p_mut}")
     gens = 1 + max((int(r["gen"]) for r in rows), default=-1)
+    if a.method == "llm":
+        L.append(f"提示词 sha256 {prompt_sha256(a)[:12]}…")
     L += ["", f"代数 {gens}，候选 {len(rows)}：" + "，".join(
         f"{k} {sum(r['status'] == k for r in rows)}" for k in ("mpc", "invalid", "screened", "duplicate", "no_design"))]
     kinds: dict[str, int] = {}
@@ -316,11 +322,12 @@ def write_summary(out: Path, a, log: Log) -> str:
                  f"重复率 {sum(r['status'] == 'duplicate' for r in rows) / len(rows):.3f}")
     if mpc:
         f = np.array([float(r["fitness"]) for r in mpc])
+        L.append(f"评估 {len(used)} 次（预算），其中实际跑 MPC 的不同设计 {len(mpc)} 个、重复 {len(used) - len(mpc)} 个")
         L.append(f"MPC {len(mpc)} 次：最好 {f.max():.1f}，中位数 {np.median(f):.1f}，能走（≥ 20）{np.mean(f >= 20):.2f}；"
                  f"峰值速度 > 6 m/s 的回合 {sum(int(r['fast_episodes'] or 0) for r in mpc)}")
         for k in (50, 100, 150, 200, 300, 400):
-            if len(mpc) >= k:
-                L.append(f"  前 {k} 次 MPC 的最好得分 {max(float(r['fitness']) for r in mpc[:k]):.1f}")
+            if len(used) >= k:
+                L.append(f"  前 {k} 次评估的最好得分 {max(float(r['fitness']) for r in used[:k]):.1f}")
         top = sorted(mpc, key=lambda r: -float(r["fitness"]))[:5]
         L.append("最好的 5 个：")
         for r in top:
@@ -343,10 +350,15 @@ def write_summary(out: Path, a, log: Log) -> str:
         w = csv.writer(fh)
         w.writerow(["n_mpc", "best_so_far", "fitness"])
         best = -np.inf
-        for k, r in enumerate(mpc, 1):
+        for k, r in enumerate(used, 1):
             best = max(best, float(r["fitness"]))
             w.writerow([k, round(best, 3), r["fitness"]])
     return text
+
+
+def prompt_sha256(a) -> str:
+    from hyblock.llm_io import PROMPT_DIR
+    return hashlib.sha256((PROMPT_DIR / "system.txt").read_bytes()).hexdigest()
 
 
 def build_parser():
@@ -357,7 +369,7 @@ def build_parser():
     p.add_argument("--batch", type=int, default=16, help="candidates per generation")
     p.add_argument("--max_gens", type=int, default=None, help="default: 4 x budget / batch")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--max_modules", type=int, default=6)
+    p.add_argument("--max_modules", type=int, default=8)
     p.add_argument("--terrain", default="flat")
     p.add_argument("--terrain_scale", type=float, default=1.0)
     p.add_argument("--episodes", type=int, default=2)
@@ -399,7 +411,7 @@ def main(argv=None):
         return
     from wj_tools.run_meta import done, start
     start(out, threads=a.threads, note=f"hyblock.search {a.method} seed {a.seed} budget {a.budget}",
-          screen_version=SCREEN_VERSION, args=vars(a))
+          screen_version=SCREEN_VERSION, prompt_sha256=prompt_sha256(a), args=vars(a))
     log = run(a, out)
     print(write_summary(out, a, log), flush=True)
     if log.n_mpc() >= a.budget:

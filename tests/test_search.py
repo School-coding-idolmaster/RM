@@ -73,17 +73,19 @@ class SearchTests(unittest.TestCase):
         out = self.tmp / "llm"
         with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "x"}), \
                 mock.patch("robomorph.evolution.llm.anthropic_chat_full", side_effect=fake):
-            search.main(["--method", "llm", "--budget", "2", "--batch", "4", "--llm_workers", "1",
+            search.main(["--method", "llm", "--budget", "3", "--batch", "4", "--llm_workers", "1",
                          "--out", str(out)] + FAST)
         st = [r["status"] for r in rows(out)]
         self.assertEqual(st[:4], ["mpc", "duplicate", "invalid", "no_design"])
+        self.assertEqual(st.count("mpc") + st.count("duplicate"), 3)          # duplicates use budget
+        self.assertTrue((out / "DONE").exists())
         self.assertEqual(rows(out)[2]["kind"], "self_collision")
         self.assertIn("Example 0:", calls[-1])                              # gen 1 prompt shows the best design
         self.assertTrue(any((out / "llm_cache").glob("*.json")))
         # replay into a fresh directory with the same cache: no API calls, same designs
         out2 = self.tmp / "llm2"
         with mock.patch("robomorph.evolution.llm.anthropic_chat_full", side_effect=AssertionError("no API")):
-            search.main(["--method", "llm", "--budget", "2", "--batch", "4", "--llm_workers", "1", "--replay",
+            search.main(["--method", "llm", "--budget", "3", "--batch", "4", "--llm_workers", "1", "--replay",
                          "--llm_cache", str(out / "llm_cache"), "--out", str(out2)] + FAST)
         self.assertEqual([r["design"] for r in rows(out2)], [r["design"] for r in rows(out)])
 

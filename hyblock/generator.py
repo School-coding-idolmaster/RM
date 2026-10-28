@@ -92,7 +92,7 @@ def add_foot(d: Design, rng: random.Random, spec: ModuleSpec, max_modules: int) 
     return out if _valid(out, spec, max_modules) else None
 
 
-def random_design(rng: random.Random | int | None = None, max_modules: int = 6, spec: ModuleSpec | None = None,
+def random_design(rng: random.Random | int | None = None, max_modules: int = 8, spec: ModuleSpec | None = None,
                   n_modules: int | None = None, p_hub_root: float = 0.5, p_foot: float = 0.7,
                   max_tries: int = 300) -> Design:
     """随机设计：目标模块数在 1…max_modules 中均匀抽（镜像和并联按实际模块计；分支件不计入），
@@ -189,7 +189,7 @@ MUTATIONS = {
 }
 
 
-def mutate(d: Design, rng: random.Random | int | None = None, max_modules: int = 6,
+def mutate(d: Design, rng: random.Random | int | None = None, max_modules: int = 8,
            spec: ModuleSpec | None = None, max_tries: int = 50) -> tuple[Design, str]:
     """随机选一种变异，直到得到一个合法的新设计。返回 (新设计, 变异名)。"""
     spec = spec or load_spec()
@@ -249,7 +249,7 @@ def _remove_subtree(d: Design, name: str) -> Design:
     return out
 
 
-def crossover(a: Design, b: Design, rng: random.Random | int | None = None, max_modules: int = 6,
+def crossover(a: Design, b: Design, rng: random.Random | int | None = None, max_modules: int = 8,
               spec: ModuleSpec | None = None, max_tries: int = 30) -> Design | None:
     """子树交换：从 a 去掉一棵随机子树（a 只有根时不去），在原位置（或 a 的随机空闲口）接上 b 的一棵随机子树。
     结果必须合法（含模块数上限、自碰撞），否则重试；都不行返回 None。"""

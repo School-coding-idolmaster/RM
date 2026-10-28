@@ -197,7 +197,7 @@ def main():
     p.add_argument("--random", type=int, default=0, help="number of random designs")
     p.add_argument("--seed", type=int, default=0, help="random-design seed")
     p.add_argument("--hand", action="store_true", help="include the hand-made designs of hyblock/calibrate.py")
-    p.add_argument("--max_modules", type=int, default=6)
+    p.add_argument("--max_modules", type=int, default=8)
     p.add_argument("--screen", choices=["on", "record", "off"], default="on")
     p.add_argument("--terrain", default="flat")
     p.add_argument("--terrain_scale", type=float, default=1.0)
