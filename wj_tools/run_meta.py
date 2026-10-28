@@ -4,6 +4,7 @@ Python 里：
     from wj_tools.run_meta import start, done
     start(out_dir, cmd=..., threads=8, note="...")   # 运行开始时
     done(out_dir, n_designs=70)                      # 正常结束时
+续跑时再次 start：旧记录的要点移进 previous_starts。
 命令行：
     python wj_tools/run_meta.py start OUT_DIR --threads 8 --note "xcheck seed 0" --cmd "..."
     python wj_tools/run_meta.py done OUT_DIR
@@ -43,6 +44,14 @@ def start(out_dir, cmd: str | None = None, threads: int | None = None, note: str
         "llm_effort": os.environ.get("LLM_EFFORT"),
     })
     meta.update(extra)
+    prev = out / "run_meta.json"
+    if prev.exists():                        # 续跑：保留之前每次启动的记录
+        try:
+            old = json.loads(prev.read_text(encoding="utf-8"))
+            meta["previous_starts"] = old.pop("previous_starts", []) + [
+                {k: old.get(k) for k in ("started_at", "host", "git_commit", "git_dirty", "cmd")}]
+        except (OSError, ValueError):
+            pass
     (out / "run_meta.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     done_flag = out / "DONE"
     if done_flag.exists():   # 重新开始（或续跑）的运行在结束前不算完成

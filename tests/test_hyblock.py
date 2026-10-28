@@ -105,7 +105,7 @@ class DesignTextTests(unittest.TestCase):
         text = ("h0=root; m1=h0.zp@90 q60/120 mirror; m2=m1.P2@180 q30/150; h3=m2.P2@270; "
                 "m4=h3.zm@90 mirror; foot=m4.P2; m5=h0.xp@0 q100/40; foot=m5.P2")
         robot, ex = build_robot(text, max_modules=20, ground_x=GROUND_X)
-        m = mujoco.MjModel.from_xml_string(compile_design(text, max_modules=20))
+        m = mujoco.MjModel.from_xml_string(compile_design(text, max_modules=20, check_self_collision=False))
         d = mujoco.MjData(m)
         rng = np.random.default_rng(1)
         base, q = {}, []

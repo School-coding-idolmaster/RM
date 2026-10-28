@@ -3,7 +3,8 @@
 生成过程按文法规则逐步加零件（与 prompts/system.txt 的规则一一对应）：
   r0 根零件（模块或分支件）；r1 串联（空闲板口 ← 新模块）；r2 加分支件（任意空闲口 ← 新分支件）；
   r3 分支（分支件的空闲面 ← 新模块）；r4 镜像（分支件 zp / zm 面，另一侧自动对称）；r5 并联 x2；r6 被动脚。
-每一步都用 design.build_robot 检查，无效就重抽。
+每一步都用 design.build_robot 检查，无效就重抽；打开自碰撞时（modules.yaml sim.self_collision，10-28 起）还检查初始姿态
+零件不互相穿透（mjcf.check_self_collision），所以随机设计和变异结果都不会因 self_collision 被判无效。
 """
 from __future__ import annotations
 
@@ -42,6 +43,9 @@ def _next_name(d: Design, prefix: str) -> str:
 def _valid(d: Design, spec: ModuleSpec, max_modules: int) -> bool:
     try:
         build_robot(d, spec, max_modules=max_modules)
+        if spec.sim.get("self_collision", False):
+            from hyblock.mjcf import check_self_collision
+            check_self_collision(d, spec, max_modules=max_modules)
         return True
     except DesignError:
         return False

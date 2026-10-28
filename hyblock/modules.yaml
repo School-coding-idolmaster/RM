@@ -75,6 +75,9 @@ sim:
   init_clearance_m: 0.02                 # 初始时最低点离地高度
   torso_touch_m: 0.005                   # 躯干（根零件的基体）最低角低于此高度 = 触地终止
   floor_friction: 1.0
+  self_collision: true                   # 10-28 [WJ 决定]：不相邻的零件之间开启碰撞（父子刚体 = 直接相连的方块、板、脚除外，
+                                         #   MuJoCo filterparent）。之前与 RM 相同、零件之间不碰撞：随机设计里 47% 初始姿态就互相穿透
+  self_collision_tol_m: 0.005            # 初始姿态零件穿透深度超过它 = 无效设计（kind self_collision；与 RoboGrammar 的 presimulate 相同）
 
 tiers:
   pressure_MPa: [8.0, 14.0, 21.0]        # [论文]

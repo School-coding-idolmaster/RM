@@ -9,7 +9,10 @@
 - 速度上限：关节阻尼 b = 伸出侧力矩上限 / 最大速度（线性力矩–速度曲线，相当于阀控缸的流量限制）
 - 被动脚：无关节子 body，球几何
 - 根零件朝下的面贴地，+x 指向世界 −x（前进方向，与 RM 的奖励一致）
-- 机器人几何不互相碰撞（与 RM 相同：contype=1, conaffinity=0）；地面 priority=1，接触摩擦由地面（地形）决定
+- 自碰撞（10-28 起，modules.yaml sim.self_collision）：机器人几何 contype=1, conaffinity=1，不相邻零件之间碰撞，
+  父子刚体（直接相连的方块、板、脚）由 MuJoCo filterparent 排除；关掉时与 RM 相同（conaffinity=0，零件之间不碰撞）。
+  初始姿态下零件互相穿透超过 sim.self_collision_tol_m 的设计无效（DesignError kind = self_collision）
+- 地面 priority=1，接触摩擦由地面（地形）决定
 - <custom> 里写入 hyblock_* 数值，mpc/mppi.py 据此切换到 Hyblock 域的动作映射、终止条件和初始化
 """
 from __future__ import annotations
@@ -20,7 +23,7 @@ import xml.etree.ElementTree as ET
 import mujoco
 import numpy as np
 
-from hyblock.design import Design, Expanded, build_robot
+from hyblock.design import Design, DesignError, Expanded, build_robot
 from hyblock.model import ModuleSpec, ground_frame, inv_T, load_spec, rot_x, rot_z
 
 GROUND_X = (-1.0, 0.0, 0.0)        # 根零件的 +x 指向世界 −x（前进方向）
@@ -47,7 +50,7 @@ def torso_box(spec: ModuleSpec, kind: str) -> list[float]:
 
 class _Builder:
     def __init__(self, spec, ex: Expanded, pressure_MPa, mass_scale, par_eta, max_speed_deg_s,
-                 time_constant_s, armature, fixed_base, floor_friction):
+                 time_constant_s, armature, fixed_base, floor_friction, self_collision=None):
         self.spec, self.ex = spec, ex
         self.P = pressure_MPa * 1e6
         self.mass_scale, self.fixed_base = mass_scale, fixed_base
@@ -57,6 +60,7 @@ class _Builder:
         self.tc = time_constant_s if time_constant_s is not None else act.get("time_constant_s", 0.03)
         self.armature = armature if armature is not None else act.get("armature", 0.3)
         self.floor_friction = floor_friction if floor_friction is not None else spec.sim.get("floor_friction", 1.0)
+        self.self_collision = bool(spec.sim.get("self_collision", False) if self_collision is None else self_collision)
         self.children: dict[tuple[int, str], list[int]] = {}
         for j, n in enumerate(ex.nodes):
             if n.parent >= 0:
@@ -139,7 +143,7 @@ class _Builder:
         ET.SubElement(custom, "numeric", name="hyblock_init_clearance", data=_f(sp.sim.get("init_clearance_m", 0.02)))
         ET.SubElement(custom, "numeric", name="hyblock_n_frames", data=_f(sp.sim.get("n_frames", 5)))
         default = ET.SubElement(root, "default")
-        ET.SubElement(default, "geom", contype="1", conaffinity="0", condim="3")
+        ET.SubElement(default, "geom", contype="1", conaffinity="1" if self.self_collision else "0", condim="3")
         asset = ET.SubElement(root, "asset")
         ET.SubElement(asset, "texture", name="grid", type="2d", builtin="checker", width="512", height="512",
                       rgb1=".1 .2 .3", rgb2=".2 .3 .4")
@@ -190,21 +194,75 @@ def lowest_point(model: mujoco.MjModel, data: mujoco.MjData) -> float:
     return zmin
 
 
+def self_penetration(model: mujoco.MjModel, data: mujoco.MjData | None = None) -> tuple[float, str]:
+    """零件之间的最大穿透深度（m）与对应的刚体对（\"名|名\"）。不看地面；父子刚体（filterparent）不算。
+    不改变 model（临时打开机器人几何之间的碰撞，结束时恢复）。data 给定时用它的姿态，否则用 qpos0。"""
+    m = model
+    keep = (m.geom_contype.copy(), m.geom_conaffinity.copy(), m.body_contype.copy(), m.body_conaffinity.copy())
+    robot = m.geom_bodyid != 0
+    try:
+        m.geom_contype[:] = np.where(robot, 2, 0)
+        m.geom_conaffinity[:] = np.where(robot, 2, 0)
+        m.body_contype[:] = np.where(np.arange(m.nbody) > 0, 2, 0)     # the broadphase filters on these too
+        m.body_conaffinity[:] = m.body_contype
+        d = mujoco.MjData(m)
+        if data is not None:
+            d.qpos[:] = data.qpos
+        mujoco.mj_forward(m, d)
+        worst, pair = 0.0, ""
+        for c in d.contact[:d.ncon]:
+            if -c.dist > worst:
+                worst = float(-c.dist)
+                b1, b2 = m.geom_bodyid[c.geom1], m.geom_bodyid[c.geom2]
+                pair = (f"{mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b1)}|"
+                        f"{mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b2)}")
+        return worst, pair
+    finally:
+        m.geom_contype[:], m.geom_conaffinity[:], m.body_contype[:], m.body_conaffinity[:] = keep
+
+
+def check_self_collision(design: Design | str, spec: ModuleSpec | None = None, max_modules: int | None = None,
+                         tol: float | None = None) -> float:
+    """初始姿态零件穿透深度（m）；超过 tol（默认 modules.yaml sim.self_collision_tol_m）抛 DesignError。
+    只做合法性检查时用（生成器、变异）；compile_design 默认也会检查。"""
+    spec = spec or load_spec()
+    _, ex = build_robot(design, spec, max_modules=max_modules)
+    m = mujoco.MjModel.from_xml_string(_Builder(spec, ex, pressure_MPa=8.0, mass_scale=1.0, par_eta=None, max_speed_deg_s=None,
+                                                   time_constant_s=None, armature=None, fixed_base=False,
+                                                   floor_friction=None).build(0.0))
+    pen, pair = self_penetration(m)
+    tol = spec.sim.get("self_collision_tol_m", 0.005) if tol is None else tol
+    if pen > tol:
+        raise DesignError("self_collision", f"初始姿态零件互相穿透 {pen * 1000:.0f} mm（{pair}）")
+    return pen
+
+
 def compile_design(design: Design | str, spec: ModuleSpec | None = None, *, pressure_MPa: float = 8.0,
                    mass_scale: float = 1.0, par_eta: float | None = None, max_speed_deg_s: float | None = None,
                    time_constant_s: float | None = None, armature: float | None = None,
                    fixed_base: bool = False, floor_friction: float | None = None,
-                   max_modules: int | None = None, max_hubs: int | None = None) -> str:
+                   max_modules: int | None = None, max_hubs: int | None = None,
+                   self_collision: bool | None = None, check_self_collision: bool = True) -> str:
     """设计文本 / Design -> MJCF 字符串。无效设计抛 DesignError（带 kind）。
 
     浮动基座：躯干高度自动定为\"初始姿态下最低点离地 init_clearance\"。fixed_base=True 时根零件焊在地面上
-    （用于和静力学模型比较重力项）。"""
+    （用于和静力学模型比较重力项）。
+    self_collision：仿真里零件之间是否碰撞（None = modules.yaml sim.self_collision）。check_self_collision：初始姿态
+    穿透超过 sim.self_collision_tol_m 时抛 DesignError(self_collision)（只在打开自碰撞时检查）。"""
     spec = spec or load_spec()
     _, ex = build_robot(design, spec, max_modules=max_modules, max_hubs=max_hubs, mass_scale=mass_scale,
                         par_eta=par_eta, pressure_MPa=pressure_MPa, ground_x=GROUND_X)
     kw = dict(pressure_MPa=pressure_MPa, mass_scale=mass_scale, par_eta=par_eta, max_speed_deg_s=max_speed_deg_s,
-              time_constant_s=time_constant_s, armature=armature, fixed_base=fixed_base, floor_friction=floor_friction)
-    xml = _Builder(spec, ex, **kw).build(0.0)
+              time_constant_s=time_constant_s, armature=armature, fixed_base=fixed_base, floor_friction=floor_friction,
+              self_collision=False if fixed_base else self_collision)
+    # fixed_base: the root is welded to the world, so MuJoCo's filterparent no longer excludes the root's own
+    # plates (weld parent = world); that mode is only for the gravity comparison, so no self-collision there
+    builder = _Builder(spec, ex, **kw)
+    xml = builder.build(0.0)
+    if builder.self_collision and check_self_collision:
+        pen, pair = self_penetration(mujoco.MjModel.from_xml_string(xml))
+        if pen > spec.sim.get("self_collision_tol_m", 0.005):
+            raise DesignError("self_collision", f"初始姿态零件互相穿透 {pen * 1000:.0f} mm（{pair}）")
     if fixed_base:
         return xml
     m = mujoco.MjModel.from_xml_string(xml)
