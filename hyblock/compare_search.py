@@ -3,7 +3,7 @@
 用法（Claude 的虚拟机或 WSL，需要 matplotlib 才出图）：
     python -m hyblock.compare_search ../from_mac/mac_runs/base_flat8 --out ../from_mac/mac_runs/base_flat8/compare
 输入目录下每个 <方法>_s<种子>/evals.csv 是一次运行（没有 DONE 的也读，标出未完成）。
-第 9 周起：ga_llmmut（GA + LLM 变异，读 llm_mut.csv）、llm_noscore（RM 式最小忠实版）；GA 系另报"子代优于亲本"。
+第 9 周起：ga_llmmut（GA + LLM 变异，读 llm_mut.csv）、ga_llmtyped（按种类引导的 LLM 变异）、llm_noscore（RM 式最小忠实版）；GA 系另报"子代优于亲本"。
 输出：report.md、curves.csv（每种方法每个评估次数的均值 / 最小 / 最大）、curves.svg / curves.png。
 统计：种子少时只报告均值、各种子的值和 bootstrap 区间，不做显著性检验（正式实验按 pipeline 用 IQM + 分层 bootstrap）。
 """
@@ -112,7 +112,7 @@ def main():
     for r in runs:
         r["stats"] = run_stats(r)
         by[r["method"]].append(r)
-    known = ("random", "ga", "ga_llmmut", "llm", "llm_noscore", "llm_top16")
+    known = ("random", "ga", "ga_llmmut", "ga_llmtyped", "llm", "llm_noscore", "llm_top16")
     order = [m for m in known if m in by] + [m for m in by if m not in known]
 
     L = [f"# 搜索对比：{root.name}", "", f"运行 {len(runs)} 个：" + "，".join(
@@ -195,7 +195,7 @@ def main():
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         colors = {"random": "#7f7f7f", "ga": "#1f77b4", "llm": "#d62728", "ga_llmmut": "#2ca02c",
-                  "llm_noscore": "#ff7f0e", "llm_top16": "#9467bd"}
+                  "llm_noscore": "#ff7f0e", "llm_top16": "#9467bd", "ga_llmtyped": "#17becf"}
         fig, ax = plt.subplots(figsize=(7, 4.2))
         for m in order:
             for r in by[m]:

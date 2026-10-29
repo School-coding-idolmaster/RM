@@ -15,6 +15,12 @@ LLM 看到的内容（系统提示 = 提示词 v2 的零件 / 规则 / 上限 / 
 （模块数上限、自碰撞等）。不通过时带着原因（英文，含模块数、穿透深度与零件名）重问 --mut_retries 次；仍不通过则
 退回一次随机变异（来源记为 llm_fail>mutate:…），保证每代候选数与普通 GA 相同。
 
+--mutation llm_typed（10-30，WJ 选的方案 A）：第 9 周自由形式版 64% 的修改都是初始关节角（随机变异 16%），结构修改
+很少，搜索在第 33–143 次评估后停滞。改为"按种类引导"：修改种类按普通 GA 同样的 9 种（generator.MUTATIONS）均匀随机抽
+（抽到对这个设计不可能的种类就重抽），LLM 只决定改哪里、怎么改；系统提示换成 prompts/mutate_typed.txt（写明初始角只决定
+起始姿态、MPC 会自由驱动关节；不再列举修改方式）。回复的修改种类不符时按无效处理（outcome = wrong_kind）并带原因重问；
+仍不行退回同一种类的随机变异。自由形式版（--mutation llm、prompts/mutate.txt）保持不变，结果可重放。
+
 记录：<out>/llm_mut.csv 每次 LLM 调用一行（代、序号、第几次、输入、结果、原因、token）；evals.csv 的 source 为
 llm_mut / llm_mut_retry / llm_fail>mutate:…（交叉后的为 crossover+…），llm_in / llm_out / llm_s / llm_calls 为该候选
 所有调用之和。
@@ -35,8 +41,27 @@ from hyblock.model import load_spec
 
 MARKER = "You are to apply rules sequentially"          # system.txt: generation instructions start here
 ATTEMPT_FIELDS = ["gen", "idx", "attempt", "input_kind", "parents", "input_fitness", "input_design", "outcome",
-                  "kind", "reason", "change", "design", "llm_in", "llm_out", "llm_s", "cached"]
-# outcome: ok | invalid（kind = DesignError 类别）| duplicate | unchanged | no_design
+                  "kind", "reason", "change", "design", "llm_in", "llm_out", "llm_s", "cached", "req"]
+# outcome: ok | invalid（kind = DesignError 类别）| duplicate | unchanged | no_design | wrong_kind（llm_typed）
+# req: llm_typed 时要求的修改种类（generator.MUTATIONS 的名字）
+
+# 修改种类（与 generator.MUTATIONS 同名）→ 给 LLM 的要求
+TYPE_TEXT = {
+    "add_module": "attach exactly one new module to a free port (you choose the port, the roll, its initial angles, "
+                  "and whether it gets mirror or x2; you may also put a foot on it)",
+    "add_hub": "attach exactly one new hub to a free port (you choose the port and the roll; you may also put a foot on it)",
+    "remove_part": "remove one module or hub together with everything attached below it",
+    "roll": "change the roll of one existing connection",
+    "q0": "change the initial joint angles (q) of one module",
+    "parallel": "add or remove x2 on one module",
+    "mirror": "add or remove mirror on one part attached to hub face zp or zm",
+    "add_foot": "add one foot on a free port",
+    "remove_foot": "remove one foot",
+}
+KIND_NAMES = {"add_module": "added a module", "add_hub": "added a hub", "remove_part": "removed a part",
+              "move": "moved a part", "roll": "changed a roll", "q": "changed initial joint angles",
+              "x2": "changed x2", "mirror": "changed mirror", "add_foot": "added a foot",
+              "remove_foot": "removed a foot"}
 
 KIND_TEXT = {
     "syntax": "the design line could not be parsed",
@@ -55,15 +80,60 @@ KIND_TEXT = {
 }
 
 
-def system_prompt(max_modules: int) -> str:
+def system_prompt(max_modules: int, typed: bool = False) -> str:
     base = (PROMPT_DIR / "system.txt").read_text(encoding="utf-8")
     common = base[:base.index(MARKER)].rstrip() + "\n\n"
-    text = common + (PROMPT_DIR / "mutate.txt").read_text(encoding="utf-8")
+    text = common + (PROMPT_DIR / ("mutate_typed.txt" if typed else "mutate.txt")).read_text(encoding="utf-8")
     return text.replace("{max_modules}", str(max_modules))
 
 
-def prompt_sha256(max_modules: int = 8) -> str:
-    return hashlib.sha256(system_prompt(max_modules).encode("utf-8")).hexdigest()
+def prompt_sha256(max_modules: int = 8, typed: bool = False) -> str:
+    return hashlib.sha256(system_prompt(max_modules, typed).encode("utf-8")).hexdigest()
+
+
+def edit_kinds(parent: str, child: str) -> tuple[set, int]:
+    """亲本 → 子代的实际修改种类（集合）与新零件数。种类：add_module、add_hub、remove_part、move、roll、q、x2、
+    mirror、add_foot、remove_foot（按零件名对比）。"""
+    P, C = parse(parent), parse(child)
+    pp = {p.name: p for p in P.parts}
+    cp = {p.name: p for p in C.parts}
+    k = {"add_" + cp[n].kind for n in set(cp) - set(pp)}
+    if set(pp) - set(cp):
+        k.add("remove_part")
+    for n in set(pp) & set(cp):
+        a, b = pp[n], cp[n]
+        if (a.parent, a.parent_port) != (b.parent, b.parent_port):
+            k.add("move")
+        if a.roll != b.roll:
+            k.add("roll")
+        if tuple(a.q0_deg) != tuple(b.q0_deg):
+            k.add("q")
+        if a.n_par != b.n_par:
+            k.add("x2")
+        if a.mirror != b.mirror:
+            k.add("mirror")
+    from collections import Counter
+    fa, fb = Counter(P.feet), Counter(C.feet)
+    if fb - fa:
+        k.add("add_foot")
+    if fa - fb:
+        k.add("remove_foot")
+    return k, len(set(cp) - set(pp))
+
+
+def matches(req: str, parent: str, child: str) -> tuple[bool, str]:
+    """子代的修改是否属于要求的种类。-> (是否符合, 实际做了什么（英文）)。"""
+    k, n_new = edit_kinds(parent, child)
+    did = ", ".join(KIND_NAMES.get(x, x) for x in sorted(k)) or "changed nothing"
+    allowed = {"q0": ({"q"}, set()), "roll": ({"roll"}, set()), "parallel": ({"x2"}, set()),
+               "mirror": ({"mirror"}, set()), "add_foot": ({"add_foot"}, set()),
+               "remove_foot": ({"remove_foot"}, set()), "add_module": ({"add_module"}, {"add_foot"}),
+               "add_hub": ({"add_hub"}, {"add_foot"}), "remove_part": ({"remove_part"}, {"remove_foot"})}[req]
+    must, extra = allowed
+    ok = must <= k and k <= must | extra
+    if ok and req in ("add_module", "add_hub") and n_new != 1:
+        ok, did = False, f"added {n_new} new parts"
+    return ok, did
 
 
 def extract_change(text: str) -> str:
@@ -155,6 +225,7 @@ class Context:
 
     def user_prompt(self, job: dict) -> str:
         a, text = self.a, job["design"]
+        req = job.get("req")
         skip = {text, job["parent"]["design"]} | ({job["other"]["design"]} if job.get("other") else set())
         L = ["## Design to modify", self.describe_input(job), ""]
         best = [r for r in self.scored if r["design"] not in skip][:a.mut_good]
@@ -183,8 +254,12 @@ class Context:
         if sim:
             L += ["## Other evaluated designs most similar to the design to modify (already tried; do not repeat them)"]
             L += [f"score {float(r['fitness']):.1f} | {r['design']}" for r in sim] + [""]
-        L.append("Make one targeted modification of the design to modify so that the robot walks faster. "
-                 "The new design must not be identical to any design above.")
+        if req:
+            L += ["## Required kind of change", f"You must {TYPE_TEXT[req]}. Choose where and how so that the robot "
+                  "walks faster, and change nothing else. The new design must not be identical to any design above."]
+        else:
+            L.append("Make one targeted modification of the design to modify so that the robot walks faster. "
+                     "The new design must not be identical to any design above.")
         return "\n".join(L)
 
 
@@ -202,7 +277,8 @@ class LLMMutator:
         self.a = a
         self.llm = llm                                   # search.LLM: cache, replay, API call
         self.spec = load_spec()
-        self.system = system_prompt(a.max_modules)
+        self.typed = getattr(a, "mutation", "llm") == "llm_typed"
+        self.system = system_prompt(a.max_modules, self.typed)
         self.path = out / "llm_mut.csv"
         self.attempts: list[dict] = []
         if self.path.exists():
@@ -215,8 +291,12 @@ class LLMMutator:
         if key in self.logged:                           # resume: recomputed from cache, already written
             return
         new = not self.path.exists()
+        fields = ATTEMPT_FIELDS
+        if not new:                                      # keep the header of an existing (older) file
+            with open(self.path, newline="", encoding="utf-8") as f:
+                fields = next(csv.reader(f), None) or ATTEMPT_FIELDS
         with open(self.path, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=ATTEMPT_FIELDS)
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             if new:
                 w.writeheader()
             w.writerow({k: row.get(k, "") for k in ATTEMPT_FIELDS})
@@ -246,11 +326,40 @@ class LLMMutator:
                 check_self_collision(text, self.spec, max_modules=self.a.max_modules)
         except DesignError as e:
             return None, "invalid", e.kind, reason_text(text, e, self.a.max_modules, self.spec)
+        if job.get("req"):
+            ok, did = matches(job["req"], job["design"], text)
+            if not ok:
+                return None, "wrong_kind", "wrong_kind", f"you were asked to {TYPE_TEXT[job['req']]}, but your design {did}"
         return text, "ok", "", ""
+
+    def _applicable(self, design: str, name: str, rng: random.Random) -> bool:
+        """这种随机变异对这个设计能不能做出一个合法的新设计（试几次）。"""
+        from hyblock.generator import MUTATIONS, _valid
+        d = parse(design)
+        for _ in range(8):
+            out = MUTATIONS[name](d, rng=rng, spec=self.spec, max_modules=self.a.max_modules)
+            if out is not None and to_text(out) != design and _valid(out, self.spec, self.a.max_modules):
+                return True
+        return False
+
+    def assign_kinds(self, gen: int, jobs: dict) -> None:
+        """llm_typed：每个要变异的子代均匀抽一种修改（与 generator.mutate 一样从 9 种里抽，做不了就重抽）。"""
+        from hyblock.generator import MUTATIONS
+        names = list(MUTATIONS)
+        for i, job in jobs.items():
+            rng = random.Random(f"hyblock-search|{self.a.seed}|{gen}|llm-kind|{i}")
+            job["req"] = names[0]
+            for _ in range(30):
+                name = rng.choice(names)
+                if self._applicable(job["design"], name, rng):
+                    job["req"] = name
+                    break
 
     def mutate_batch(self, gen: int, jobs: dict, out: list, seen: set, rows: list[dict]) -> None:
         """jobs: {序号: {design, kind: parent|crossover, parent, other, ops, parents}}；结果写进 out[序号]。"""
-        from hyblock.generator import mutate
+        from hyblock.generator import MUTATIONS, _valid, mutate
+        if self.typed:
+            self.assign_kinds(gen, jobs)
         ctx = Context(rows, self.attempts, gen, self.a)
         scores = {r["design"]: float(r["fitness"]) for r in ctx.scored}
         base = {i: ctx.user_prompt(j) for i, j in jobs.items()}
@@ -280,11 +389,12 @@ class LLMMutator:
                            "input_design": job["design"], "outcome": outcome, "kind": kind, "reason": why,
                            "change": extract_change(rec.get("response", "")), "design": text or raw or "",
                            "llm_in": u.get("input_tokens", ""), "llm_out": u.get("output_tokens", ""),
-                           "llm_s": rec.get("seconds", ""), "cached": rec.get("cached", "")})
+                           "llm_s": rec.get("seconds", ""), "cached": rec.get("cached", ""), "req": job.get("req", "")})
                 if text is not None:
                     seen.add(text)
                     out[i]["design"] = text
-                    out[i]["source"] = "+".join(job["ops"] + ["llm_mut" if attempt == 0 else "llm_mut_retry"])
+                    tag = ("llm_mut" if attempt == 0 else "llm_mut_retry") + (f"[{job['req']}]" if job.get("req") else "")
+                    out[i]["source"] = "+".join(job["ops"] + [tag])
                 else:
                     users[i] = base[i] + retry_block(text or raw, why)
                     still.append(i)
@@ -292,11 +402,21 @@ class LLMMutator:
         for i in pending:                                  # LLM failed every attempt: one random mutation
             rng = random.Random(f"hyblock-search|{self.a.seed}|{gen}|llm-fallback|{i}")
             d = parse(jobs[i]["design"])
-            for _ in range(20):
-                child, name = mutate(d, rng, max_modules=self.a.max_modules)
-                text = to_text(child)
-                if text not in seen:
-                    break
+            req = jobs[i].get("req")
+            text, name = None, "none"
+            if req:                                        # llm_typed: a random mutation of the required kind
+                for _ in range(40):
+                    c = MUTATIONS[req](d, rng=rng, spec=self.spec, max_modules=self.a.max_modules)
+                    if c is not None and _valid(c, self.spec, self.a.max_modules) and to_text(c) not in seen \
+                            and to_text(c) != jobs[i]["design"]:
+                        text, name = to_text(c), req
+                        break
+            if text is None:
+                for _ in range(20):
+                    child, name = mutate(d, rng, max_modules=self.a.max_modules)
+                    text = to_text(child)
+                    if text not in seen:
+                        break
             seen.add(text)
             out[i]["design"] = text
             out[i]["source"] = "+".join(jobs[i]["ops"] + [f"llm_fail>mutate:{name}"])
@@ -332,13 +452,14 @@ def main(argv=None):
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--min_ok", type=float, default=0.3)
+    p.add_argument("--mutation", choices=["llm", "llm_typed"], default="llm")
     p.add_argument("--dry", action="store_true")
     a0 = p.parse_args(argv)
     out = Path(a0.out)
     out.mkdir(parents=True, exist_ok=True)
     with open(a0.history, newline="", encoding="utf-8") as f:
         hist = [r for r in csv.DictReader(f) if int(r["gen"]) < a0.gen]
-    a = search.build_parser().parse_args(["--method", "ga", "--mutation", "llm", "--out", str(out),
+    a = search.build_parser().parse_args(["--method", "ga", "--mutation", a0.mutation, "--out", str(out),
                                           "--seed", str(a0.seed)])
     log = search.Log(out / "no_such_dir")
     log.rows = hist
@@ -362,7 +483,8 @@ def main(argv=None):
     ok0 = sum(r["outcome"] == "ok" for r in first) / max(1, len(first))
     print(f"LLM 变异冒烟检查：{len(first)} 个子代，{len(att)} 次调用，{time.time() - t0:.0f} s")
     for r in att:
-        print(f"  #{r['idx']} 第{int(r['attempt']) + 1}次 {r['outcome']:9s} {r['kind']:14s} {r['change'][:90]}"
+        print(f"  #{r['idx']} 第{int(r['attempt']) + 1}次 {r['outcome']:10s} {r['kind']:14s} "
+              + (f"[{r['req']}] " if r.get("req") else "") + f"{r['change'][:90]}"
               + (f"  [{r['reason'][:80]}]" if r["reason"] else ""))
     print(f"  第 1 次就通过 {ok0:.2f}{mut.gen_stats(a0.gen)}；来源 " + ", ".join(p["source"] for p in props))
     tin = sum(int(r["llm_in"] or 0) for r in att)

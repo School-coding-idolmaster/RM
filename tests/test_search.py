@@ -175,6 +175,53 @@ class SearchTests(unittest.TestCase):
         with open(out2 / "llm_mut.csv", newline="", encoding="utf-8") as f:
             self.assertEqual(len(list(csv.DictReader(f))), len(att))
 
+    def test_ga_llm_typed_mutation(self):
+        """按种类引导的 LLM 变异：每个子代有要求的种类；种类不符 → wrong_kind 重问；接受的子代种类都符合要求。"""
+        import re
+        from hyblock.design import parse
+        from hyblock.generator import MUTATIONS
+        from hyblock.llm_mutation import TYPE_TEXT, matches
+        from hyblock.model import load_spec
+        spec = load_spec()
+        by_text = {v: k for k, v in TYPE_TEXT.items()}
+        calls = []
+
+        def fake(system, user, model, retries=5):
+            self.assertIn("only set the starting pose", system)
+            calls.append(user)
+            inp = re.search(r"## Design to modify\nDESIGN: (.+)", user).group(1)
+            req = by_text[re.search(r"## Required kind of change\nYou must (.+?)\. Choose where", user).group(1)]
+            rng = random.Random(len(calls))
+            if "previous answer was rejected" not in user and req != "q0" and len(calls) % 2 == 0:
+                d = parse(inp)                                   # wrong kind: change a joint angle instead
+                m = next(p for p in d.parts if p.kind == "module")
+                m.q0_deg = (m.q0_deg[0], -30.0 if m.q0_deg[1] != -30.0 else 0.0)
+                return f"DESIGN: {to_text(d)}", {"input_tokens": 100, "output_tokens": 50}
+            for _ in range(40):
+                c = MUTATIONS[req](parse(inp), rng=rng, spec=spec, max_modules=8)
+                if c is not None and to_text(c) != inp:
+                    return f"CHANGE: {req}\nDESIGN: {to_text(c)}", {"input_tokens": 100, "output_tokens": 50}
+            return "no idea", {"input_tokens": 100, "output_tokens": 50}
+
+        out = self.tmp / "typed"
+        with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "x"}), \
+                mock.patch("robomorph.evolution.llm.anthropic_chat_full", side_effect=fake):
+            search.main(["--method", "ga", "--mutation", "llm_typed", "--budget", "16", "--batch", "6",
+                         "--llm_workers", "1", "--out", str(out)] + FAST)
+        ev = rows(out)
+        self.assertTrue((out / "DONE").exists())
+        with open(out / "llm_mut.csv", newline="", encoding="utf-8") as f:
+            att = list(csv.DictReader(f))
+        self.assertTrue(all(r["req"] in TYPE_TEXT for r in att))
+        self.assertGreaterEqual(len({r["req"] for r in att}), 3)
+        self.assertIn("wrong_kind", {r["outcome"] for r in att})
+        self.assertTrue(any("you were asked to" in r["reason"] for r in att))
+        for r in att:
+            if r["outcome"] == "ok":
+                self.assertTrue(matches(r["req"], r["input_design"], r["design"])[0], r)
+        self.assertTrue(any(re.search(r"llm_mut(_retry)?\[\w+\]", r["source"]) for r in ev))
+        self.assertIn("按种类引导", (out / "summary.txt").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@
           （RM 的 population 文本格式，含得分）；每代 --batch 次独立调用（--llm_workers 并发）
           --no_scores（第 9 周）：RM 论文 V3 的做法，示例里不写得分（其余与公开代码版相同 = "最小忠实版"）
   ga --mutation llm（第 9 周）：GA 中的随机变异换成 LLM 变异算子（hyblock/llm_mutation.py），其余与 ga 相同
+  ga --mutation llm_typed（10-30）：同上，但修改种类按随机变异同样的 9 种随机抽，LLM 只决定改哪里、怎么改
 
 续跑：evals.csv 每评估一个候选写一行，键 = (代, 序号)。随机数按 (种子, 代) 生成，LLM 回复存在 llm_cache/
 （键含模型、提示词、种子、代、序号），所以中断后重新运行会得到同样的候选并跳过已完成的行。
@@ -289,9 +290,9 @@ def run(a, out: Path) -> Log:
     log = Log(out)
     cfg = MPPIConfig(threads=a.threads, episode_control_steps=a.steps, terrain_scale=a.terrain_scale)
     scfg = ScreenConfig()
-    llm = LLM(a, out) if a.method == "llm" or a.mutation == "llm" else None
+    llm = LLM(a, out) if a.method == "llm" or a.mutation in ("llm", "llm_typed") else None
     mutator = None
-    if a.method == "ga" and a.mutation == "llm":
+    if a.method == "ga" and a.mutation in ("llm", "llm_typed"):
         from hyblock.llm_mutation import LLMMutator
         mutator = LLMMutator(a, out, llm)
     for gen in range(a.max_gens):
@@ -334,11 +335,12 @@ def write_summary(out: Path, a, log: Log) -> str:
                  f"{'示例不写得分（--no_scores），' if a.no_scores else ''}问题 {a.problem!r}")
     if a.method == "ga":
         L.append(f"GA：pop {a.pop}，锦标赛 {a.tournament}，p_cross {a.p_cross}，p_mut {a.p_mut}，变异 {a.mutation}")
-        if a.mutation == "llm":
+        if a.mutation in ("llm", "llm_typed"):
             from hyblock.llm_mutation import prompt_sha256 as mut_sha
             L.append(f"LLM 变异：{a.model}，effort {os.environ.get('LLM_EFFORT', 'high')}，重问 {a.mut_retries} 次；"
                      f"上下文 好 {a.mut_good} / 失败 {a.mut_poor} / 被拒 {a.mut_failed} / 相似 {a.mut_similar}；"
-                     f"系统提示 sha256 {mut_sha(a.max_modules)[:12]}…")
+                     f"{'按种类引导（llm_typed），' if a.mutation == 'llm_typed' else ''}"
+                     f"系统提示 sha256 {mut_sha(a.max_modules, a.mutation == 'llm_typed')[:12]}…")
     gens = 1 + max((int(r["gen"]) for r in rows), default=-1)
     if a.method == "llm":
         L.append(f"提示词 sha256 {prompt_sha256(a)[:12]}…")
@@ -376,9 +378,9 @@ def write_summary(out: Path, a, log: Log) -> str:
             cvp = child_vs_parent(rows)
             L.append("子代优于亲本（交叉取较好的亲本；① 淘汰算不优于）：" + "，".join(
                 f"{k} {n} 个中 {p:.2f}（得分差中位数 {d:+.1f}）" for k, (n, p, d) in sorted(cvp.items())))
-    if a.method == "ga" and a.mutation == "llm" and (out / "llm_mut.csv").exists():
+    if a.method == "ga" and a.mutation in ("llm", "llm_typed") and (out / "llm_mut.csv").exists():
         L += mutation_summary(out, rows)
-    if a.method == "llm" or a.mutation == "llm":
+    if a.method == "llm" or a.mutation in ("llm", "llm_typed"):
         tin = sum(int(r["llm_in"] or 0) for r in rows)
         tout = sum(int(r["llm_out"] or 0) for r in rows)
         calls = sum(int(r.get("llm_calls") or (1 if r["source"] == "llm" else 0)) for r in rows)
@@ -420,7 +422,7 @@ def mutation_summary(out: Path, rows: list[dict]) -> list[str]:
         att = list(csv.DictReader(f))
     slots = {(r["gen"], r["idx"]) for r in att}
     first = [r for r in att if r["attempt"] == "0"]
-    out_c = {k: sum(r["outcome"] == k for r in att) for k in ("ok", "invalid", "duplicate", "unchanged", "no_design")}
+    out_c = {k: sum(r["outcome"] == k for r in att) for k in ("ok", "invalid", "wrong_kind", "duplicate", "unchanged", "no_design")}
     kinds: dict[str, int] = {}
     for r in att:
         if r["outcome"] == "invalid":
@@ -464,7 +466,8 @@ def build_parser():
     p.add_argument("--problem", default=None, help="llm: task text (default: robomorph/prompts/user.txt)")
     p.add_argument("--top_k", type=int, default=3)
     p.add_argument("--no_scores", action="store_true", help="llm: examples without fitness (RM paper V3)")
-    p.add_argument("--mutation", choices=["random", "llm"], default="random", help="ga: mutation operator")
+    p.add_argument("--mutation", choices=["random", "llm", "llm_typed"], default="random",
+                   help="ga: mutation operator (llm = free-form, week 9; llm_typed = kind sampled like random mutation)")
     p.add_argument("--mut_retries", type=int, default=1, help="ga llm mutation: re-ask with the reason")
     p.add_argument("--mut_good", type=int, default=5, help="ga llm mutation: best designs shown")
     p.add_argument("--mut_poor", type=int, default=3, help="ga llm mutation: designs that failed in simulation")
@@ -486,7 +489,7 @@ def main(argv=None):
         a.problem = read_txt(prompts_path("user.txt")).strip()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    if (a.method == "llm" or a.mutation == "llm") and not a.replay and not a.summary_only:
+    if (a.method == "llm" or a.mutation in ("llm", "llm_typed")) and not a.replay and not a.summary_only:
         from dotenv import load_dotenv
         load_dotenv(dotenv_path=Path.cwd() / ".env")
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -496,9 +499,9 @@ def main(argv=None):
         return
     from wj_tools.run_meta import done, start
     extra = {}
-    if a.mutation == "llm":
+    if a.mutation in ("llm", "llm_typed"):
         from hyblock.llm_mutation import prompt_sha256 as mut_sha
-        extra["mutation_prompt_sha256"] = mut_sha(a.max_modules)
+        extra["mutation_prompt_sha256"] = mut_sha(a.max_modules, a.mutation == "llm_typed")
     start(out, threads=a.threads, note=f"hyblock.search {a.method} seed {a.seed} budget {a.budget}",
           screen_version=SCREEN_VERSION, prompt_sha256=prompt_sha256(a), args=vars(a), **extra)
     log = run(a, out)
