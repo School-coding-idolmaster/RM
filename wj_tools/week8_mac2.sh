@@ -12,6 +12,10 @@ cd "$(dirname "$0")/.." || exit 1
 RUNS="$(cd .. && pwd)/mac_runs/base_flat8"
 mkdir -p "$RUNS"
 echo "=== start $(date '+%F %T')  $(git log --oneline -1)"
+# 10-29：第一次启动在 01:08 无报错中断，记录开机时间与最近的睡眠 / 关机事件，便于判断原因
+echo "--- uptime: $(uptime)"
+last reboot 2>/dev/null | head -3 | sed 's/^/--- /'
+pmset -g log 2>/dev/null | grep -E " (Sleep|Wake|Shutdown|Restart) " | grep "$(date -v-1d '+%Y-%m-%d')\|$(date '+%Y-%m-%d')" | tail -8 | sed 's/^/--- /'
 
 if pgrep -f "wj_tools/week8_mac1.sh" >/dev/null; then
   echo "=== 停止 week8_mac1 $(date '+%T')"

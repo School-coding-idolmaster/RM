@@ -17,7 +17,12 @@ while true; do
     mkdir -p /mnt/d/RM/from_mac
     rsync -a macmini:RM/mac_runs macmini:RM/logs /mnt/d/RM/from_mac/ && echo "已拉回到 D:\\RM\\from_mac"
     ssh macmini 'f=$(ls -t ~/RM/logs/*.out 2>/dev/null | head -1); echo "--- $f"; tail -5 "$f"'
-    exit 0
+    # 正常跑完的任务日志以 "=== end" 结尾；没有就是中途停了（休眠、断电、被杀）
+    if ssh macmini 'f=$(ls -t ~/RM/logs/*.out 2>/dev/null | head -1); tail -3 "$f" | grep -q "^=== end"'; then
+      exit 0
+    fi
+    echo "!!! 任务没有正常结束（日志最后没有 === end）：可能中途停了。重新 run_mac.bat 同一个任务名即可从断点继续"
+    exit 2
   fi
   sleep "$interval"
 done
