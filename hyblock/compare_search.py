@@ -3,6 +3,7 @@
 用法（Claude 的虚拟机或 WSL，需要 matplotlib 才出图）：
     python -m hyblock.compare_search ../from_mac/mac_runs/base_flat8 --out ../from_mac/mac_runs/base_flat8/compare
 输入目录下每个 <方法>_s<种子>/evals.csv 是一次运行（没有 DONE 的也读，标出未完成）。
+第 9 周起：ga_llmmut（GA + LLM 变异，读 llm_mut.csv）、llm_noscore（RM 式最小忠实版）；GA 系另报"子代优于亲本"。
 输出：report.md、curves.csv（每种方法每个评估次数的均值 / 最小 / 最大）、curves.svg / curves.png。
 统计：种子少时只报告均值、各种子的值和 bootstrap 区间，不做显著性检验（正式实验按 pipeline 用 IQM + 分层 bootstrap）。
 """
@@ -30,7 +31,12 @@ def load(run: Path) -> dict:
     meta = json.loads((run / "run_meta.json").read_text(encoding="utf-8")) if (run / "run_meta.json").exists() else {}
     used = [r for r in rows if r["status"] in ("mpc", "duplicate")]
     curve = np.maximum.accumulate([float(r["fitness"]) for r in used]) if used else np.array([])
+    att = []
+    if (run / "llm_mut.csv").exists():
+        with open(run / "llm_mut.csv", newline="", encoding="utf-8") as f:
+            att = list(csv.DictReader(f))
     return {"name": run.name, "method": m.group(1) if m else run.name, "seed": int(m.group(2)) if m else 0,
+            "attempts": att,
             "rows": rows, "used": used, "mpc": [r for r in rows if r["status"] == "mpc"], "curve": curve,
             "done": (run / "DONE").exists(), "budget": (meta.get("args") or {}).get("budget"),
             "model": (meta.get("args") or {}).get("model")}
@@ -65,13 +71,27 @@ def run_stats(r: dict) -> dict:
           "fast": sum(int(x["fast_episodes"] or 0) for x in mpc)}
     for k in CHECKPOINTS:
         st[f"best@{k}"] = float(r["curve"][k - 1]) if len(r["curve"]) >= k else float("nan")
-    calls = [x for x in rows if x["source"] == "llm"]
+    calls = [x for x in rows if x.get("llm_in")]           # RM 式：每行 1 次；LLM 变异：llm_calls 次
     if calls:
+        n = sum(int(x.get("llm_calls") or 1) for x in calls)
         tin = sum(int(x["llm_in"] or 0) for x in calls)
         tout = sum(int(x["llm_out"] or 0) for x in calls)
         pin, pout = PRICE.get(r["model"] or "claude-haiku-5-5", PRICE["claude-haiku-5-5"])
-        st.update(llm_calls=len(calls), llm_usd=tin / 1e6 * pin + tout / 1e6 * pout,
-                  llm_s=float(np.mean([float(x["llm_s"] or 0) for x in calls])))
+        st.update(llm_calls=n, llm_usd=tin / 1e6 * pin + tout / 1e6 * pout,
+                  llm_s=sum(float(x["llm_s"] or 0) for x in calls) / max(1, n))
+    if r["method"].startswith("ga"):
+        from hyblock.search import child_vs_parent
+        st["cvp"] = child_vs_parent(rows)
+    att = r["attempts"]
+    if att:
+        first = [x for x in att if x["attempt"] == "0"]
+        slots = {(x["gen"], x["idx"]) for x in att}
+        ok_retry = sum(x["outcome"] == "ok" for x in att if x["attempt"] != "0")
+        st["mut"] = {"slots": len(slots), "calls": len(att),
+                     "ok0": sum(x["outcome"] == "ok" for x in first) / max(1, len(first)),
+                     "ok_retry": ok_retry, "fallback": sum("llm_fail" in x["source"] for x in rows),
+                     "outcomes": Counter(x["outcome"] for x in att),
+                     "kinds": Counter(x["kind"] for x in att if x["outcome"] == "invalid")}
     return st
 
 
@@ -92,7 +112,8 @@ def main():
     for r in runs:
         r["stats"] = run_stats(r)
         by[r["method"]].append(r)
-    order = [m for m in ("random", "ga", "llm") if m in by] + [m for m in by if m not in ("random", "ga", "llm")]
+    known = ("random", "ga", "ga_llmmut", "llm", "llm_noscore", "llm_top16")
+    order = [m for m in known if m in by] + [m for m in by if m not in known]
 
     L = [f"# 搜索对比：{root.name}", "", f"运行 {len(runs)} 个：" + "，".join(
         f"{r['name']}{'' if r['done'] else '（未完成）'}" for r in runs), ""]
@@ -133,6 +154,23 @@ def main():
             L.append(f"- {r['name']}：调用 {s['llm_calls']} 次，约 ${s['llm_usd']:.2f}，平均 {s['llm_s']:.1f} s/次；"
                      f"评估过的设计里照抄示例开头的比例 {s['copies_example']:.2f}")
         L.append(f"- 合计约 ${sum(r['stats']['llm_usd'] for r in llm):.2f}")
+    ga_runs = [r for r in runs if "cvp" in r["stats"]]
+    if ga_runs:
+        L += ["", "## GA 系：子代优于亲本的比例（交叉取较好的亲本；被 ① 淘汰算不优于；括号 = 子代数、得分差中位数）", "",
+              "| 运行 | 只变异 | 交叉 + 变异 | 只交叉 |", "|---|---|---|---|"]
+        for r in sorted(ga_runs, key=lambda r: (order.index(r["method"]), r["seed"])):
+            c = r["stats"]["cvp"]
+            cell = lambda k: (f"{c[k][1]:.2f}（{c[k][0]}，{c[k][2]:+.0f}）" if k in c else "—")
+            L.append(f"| {r['name']} | {cell('mutation')} | {cell('crossover+mutation')} | {cell('crossover')} |")
+    mut_runs = [r for r in runs if "mut" in r["stats"]]
+    if mut_runs:
+        L += ["", "## LLM 变异", "", "| 运行 | 子代 | 调用 | 第 1 次通过率 | 重问后通过 | 退回随机变异 | 各次调用的结果 | 无效原因 |",
+              "|---|---|---|---|---|---|---|---|"]
+        for r in sorted(mut_runs, key=lambda r: r["seed"]):
+            mu = r["stats"]["mut"]
+            L.append(f"| {r['name']} | {mu['slots']} | {mu['calls']} | {mu['ok0']:.2f} | {mu['ok_retry']} | "
+                     f"{mu['fallback']} | " + "，".join(f"{k} {v}" for k, v in mu["outcomes"].most_common()) + " | "
+                     + ("，".join(f"{k} {v}" for k, v in mu["kinds"].most_common()) or "—") + " |")
     L += ["", "## 各方法最好的设计", ""]
     for m in order:
         best = max((x for r in by[m] for x in r["mpc"]), key=lambda x: float(x["fitness"]), default=None)
@@ -156,7 +194,8 @@ def main():
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        colors = {"random": "#7f7f7f", "ga": "#1f77b4", "llm": "#d62728"}
+        colors = {"random": "#7f7f7f", "ga": "#1f77b4", "llm": "#d62728", "ga_llmmut": "#2ca02c",
+                  "llm_noscore": "#ff7f0e", "llm_top16": "#9467bd"}
         fig, ax = plt.subplots(figsize=(7, 4.2))
         for m in order:
             for r in by[m]:

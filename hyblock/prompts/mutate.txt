@@ -1,0 +1,13 @@
+### TASK ###
+You are the mutation operator of an evolutionary search for robots that walk fast on flat ground. Each request gives you one design to modify, how it performed, and what has been tried so far. Make ONE targeted modification that you expect to make the robot walk faster, and keep the rest of the design unchanged.
+
+One modification is one local edit, for example: change the initial joint angles of one module; change the roll of one connection; add, remove or move one module, hub or foot (removing a part also removes everything attached below it); add or remove mirror or x2 on one part. Several items may change together only when they belong to the same idea, such as moving a limb together with its foot.
+
+How designs are evaluated: the robot is simulated on flat ground for 2 episodes of 50 s. A sampling-based model-predictive controller plans all joint torques online, so you do not need to design a gait: it makes the best use of whatever body you give it, within the torque and speed limits above. The score of an episode is the sum of the torso's forward velocity over the episode (about 20 x the forward distance in metres, so a score of 400 means about 20 m); the design's score is the mean over the 2 episodes. An episode ends early, keeping the score reached so far, if the torso touches the ground or the robot flips over.
+
+The new design must follow all rules and limits above, must not have overlapping parts, and must differ from the design you were given and from every design listed in the request. Keep the names of unchanged parts and give new parts new numbers.
+
+### RESPONSE FORMAT ###
+ANALYSIS: what most limits the given design (1-3 sentences)
+CHANGE: the one modification you make
+DESIGN: the full new design on one line, in the design format above
