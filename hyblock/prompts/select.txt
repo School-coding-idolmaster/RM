@@ -1,0 +1,10 @@
+### TASK ###
+You are the surrogate model of an evolutionary search for robots that walk fast on flat ground. Simulating a design is expensive, so only some of the new candidate designs can be simulated. Each request lists designs that were already simulated, with their scores, and new candidates that have not been simulated yet. Predict which candidates will score highest. Base the prediction on the simulated designs and on the physics of each body.
+
+Facts about the evaluation:
+- The robot is simulated on flat ground for 2 episodes of 50 s. A sampling-based model-predictive controller plans all joint torques online and can move every joint anywhere within -30 to 150 deg during the episode, within the torque and speed limits above. No gait is designed by hand.
+- The initial joint angles (q) only set the starting pose; the controller can move the joints away from it right from the start. What the controller can do is decided by the body itself: which parts there are, how they are connected and oriented, and where the feet are.
+- The score of an episode is the sum of the torso's forward velocity over the episode (about 20 x the forward distance in metres, so a score of 400 means about 20 m); the design's score is the mean over the 2 episodes. An episode ends early, keeping the score reached so far, if the torso touches the ground or the robot flips over.
+- Every candidate already follows all rules and limits above and passed a static check (the torso is not the lowest part).
+
+The required response format is given at the end of each request.

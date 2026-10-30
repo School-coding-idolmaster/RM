@@ -14,6 +14,9 @@
           --no_scores（第 9 周）：RM 论文 V3 的做法，示例里不写得分（其余与公开代码版相同 = "最小忠实版"）
   ga --mutation llm（第 9 周）：GA 中的随机变异换成 LLM 变异算子（hyblock/llm_mutation.py），其余与 ga 相同
   ga --mutation llm_typed（10-30）：同上，但修改种类按随机变异同样的 9 种随机抽，LLM 只决定改哪里、怎么改
+  --select <挑选器>（第 10 周，② 挑选；random / ga）：第 1 代起每代提出 round(batch × --oversample) 个候选，① 筛选后只把
+          batch 个送 MPC（--rand_slots 个随机抽，其余按挑选器排序取前面的）；没挑中的记为 unselected，不占预算。
+          挑选器 random / parent / regress / knn / llm，见 hyblock/selection.py
 
 续跑：evals.csv 每评估一个候选写一行，键 = (代, 序号)。随机数按 (种子, 代) 生成，LLM 回复存在 llm_cache/
 （键含模型、提示词、种子、代、序号），所以中断后重新运行会得到同样的候选并跳过已完成的行。
@@ -47,9 +50,10 @@ from mpc.mppi import MPPIConfig, evaluate_design
 FIELDS = ["gen", "idx", "method", "source", "parents", "design", "status", "kind", "detail", "fitness",
           "ep_scores", "distance_m", "terminated", "env_steps", "peak_speed", "fast_episodes", "modules", "hubs",
           "joints", "feet", "root", "n_mpc", "best_so_far", "screen_s", "mpc_s", "llm_in", "llm_out",
-          "llm_s", "rules", "time", "llm_calls"]
+          "llm_s", "rules", "time", "llm_calls", "sel_rank", "sel_slot", "sel_pred"]
 # status: mpc（跑了 MPC，占预算）| invalid（DesignError；kind = 原因）| screened（① 淘汰；kind = 原因）
 #         | duplicate（与已评估设计相同，沿用分数，占预算）| no_design（LLM 回复里没有 DESIGN 行）
+#         | unselected（--select：通过 ① 但没被 ② 挑中，不占预算；sel_rank = 挑选器给的名次）
 # n_mpc 列 = 到这一行为止用掉的评估次数（mpc + duplicate）
 
 
@@ -104,20 +108,20 @@ def _rng(seed: int, gen: int, tag: str = "") -> random.Random:
     return random.Random(f"hyblock-search|{seed}|{gen}|{tag}")
 
 
-def propose_random(a, gen: int, log: Log) -> list[dict]:
+def propose_random(a, gen: int, log: Log, n: int | None = None) -> list[dict]:
     rng = _rng(a.seed, gen, "random")
     return [{"source": "random", "design": to_text(random_design(rng, max_modules=a.max_modules))}
-            for _ in range(a.batch)]
+            for _ in range(n or a.batch)]
 
 
-def propose_ga(a, gen: int, log: Log, mutator=None) -> list[dict]:
+def propose_ga(a, gen: int, log: Log, mutator=None, n: int | None = None) -> list[dict]:
     """mutator（--mutation llm）：要变异的子代先占位，最后由 LLM 一起变异（并发调用）；随机数的用法与普通 GA 相同。"""
     if gen == 0:
         return propose_random(a, 0, log)
     rng = _rng(a.seed, gen, "ga")
     pool = sorted(log.scored(before_gen=gen), key=lambda r: -float(r["fitness"]))[:a.pop]
     if len(pool) < 2:                                   # nothing to breed from (e.g. all screened): random
-        return propose_random(a, gen, log)
+        return propose_random(a, gen, log, n)
     seen = {r["design"] for r in log.rows if int(r["gen"]) < gen}     # gen < current: identical after a restart
 
     def pick():
@@ -125,7 +129,7 @@ def propose_ga(a, gen: int, log: Log, mutator=None) -> list[dict]:
         return max(cand, key=lambda r: float(r["fitness"]))
 
     out, jobs = [], {}
-    for i in range(a.batch):
+    for i in range(n or a.batch):
         for _try in range(20):
             pa, pb = pick(), pick()
             da = parse(pa["design"])
@@ -234,26 +238,25 @@ class LLM:
 
 # ---------------------------------------------------------------- 评估
 
-def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg: ScreenConfig) -> None:
+def precheck(a, gen: int, idx: int, prop: dict, log: Log, scfg: ScreenConfig) -> tuple[dict, str | None]:
+    """合法性 → 重复 → 编译 → ① 筛选（都很便宜）。-> (row, xml)：xml 为 None 时 row 已定（no_design / invalid /
+    duplicate / screened，由调用者写进 log），否则这个候选可以跑 MPC。"""
     row = {"gen": gen, "idx": idx, "method": a.method, **{k: v for k, v in prop.items() if k in FIELDS},
            "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     text = prop.get("design")
     if not text:
         row.update(status="no_design", kind="no_design")
-        log.add(row)
-        return
+        return row, None
     try:
         text = to_text(parse(text))                    # canonical form (LLM spacing, option order, ...)
     except DesignError as e:
         row.update(status="invalid", kind=e.kind, detail=str(e)[:200])
-        log.add(row)
-        return
+        return row, None
     row["design"] = text
     old = log.score_of(text)
     if old is not None:
         row.update(status="duplicate", fitness=old, n_mpc=log.n_mpc() + 1, best_so_far=log.best())
-        log.add(row)
-        return
+        return row, None
     t0 = time.time()
     try:
         xml = compile_design(text, max_modules=a.max_modules)
@@ -261,15 +264,25 @@ def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg:
         row.update(modules=s["modules"], hubs=s["hubs"], joints=s["joints"], feet=s["feet"], root=s["root"])
     except DesignError as e:
         row.update(status="invalid", kind=e.kind, detail=str(e)[:200])
-        log.add(row)
-        return
+        return row, None
     if a.screen == "on":
         sr = screen(text, scfg, max_modules=a.max_modules, xml=xml)
         row["screen_s"] = round(time.time() - t0, 3)
         if not sr.passed:
             row.update(status="screened", kind=sr.reason, detail=sr.detail[:200])
-            log.add(row)
-            return
+            return row, None
+    return row, xml
+
+
+def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg: ScreenConfig) -> None:
+    row, xml = precheck(a, gen, idx, prop, log, scfg)
+    if xml is None:
+        log.add(row)
+        return
+    run_mpc(a, gen, idx, row, xml, log, cfg, scfg)
+
+
+def run_mpc(a, gen: int, idx: int, row: dict, xml: str, log: Log, cfg: MPPIConfig, scfg: ScreenConfig) -> None:
     t1 = time.time()
     r = evaluate_design(xml, a.terrain, a.episodes, a.mpc_seed + 7919 * gen + idx if a.vary_mpc_seed else a.mpc_seed,
                         cfg)
@@ -286,11 +299,65 @@ def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg:
     log.add(row)
 
 
+def select_and_evaluate(a, gen: int, props: list, log: Log, cfg: MPPIConfig, scfg: ScreenConfig, selector) -> str:
+    """--select：全部候选先 precheck；通过的里由 selection.choose 挑出本代可用的评估次数个送 MPC，其余记 unselected。
+    续跑：已写进 log 的行不重做；挑选只用本代以前的记录（LLM 回复有缓存），所以重新计算会得到同样的挑选。"""
+    from hyblock.selection import candidate, choose, fit_map
+    hist = [r for r in log.rows if int(r["gen"]) < gen]
+    n_eval = max(0, min(a.batch, a.budget - sum(r["status"] in ("mpc", "duplicate") for r in hist)))
+    done = {int(r["idx"]): r for r in log.rows if int(r["gen"]) == gen}
+    fit = fit_map(hist)
+    cands, pending = [], {}
+    for idx, prop in enumerate(props):
+        if prop is None:
+            continue
+        if idx in done:
+            r = done[idx]
+            if r["status"] in ("mpc", "unselected"):
+                cands.append(candidate(idx, r["design"], r["source"], r["parents"], fit))
+            continue
+        row, xml = precheck(a, gen, idx, prop, log, scfg)
+        if xml is None:
+            log.add(row)
+            continue
+        cands.append(candidate(idx, row["design"], row.get("source", ""), row.get("parents", ""), fit))
+        pending[idx] = (row, xml)
+    res, _calls = choose(a, gen, cands, hist, selector, n_eval)
+    picked = {cands[p]["idx"]: v for p, v in res["picked"].items()}
+    allr = {cands[p]["idx"]: v for p, v in res["all"].items()}
+    for c in cands:                                      # unselected first: a restart then only redoes MPC
+        i = c["idx"]
+        if i in picked or i not in pending:
+            continue
+        row = pending[i][0]
+        rk, pred = allr.get(i, ("", ""))
+        row.update(status="unselected", sel_rank=rk, sel_pred=pred)
+        log.add(row)
+    for i in sorted(picked):
+        if i not in pending:
+            if i in done and done[i]["status"] != "mpc":
+                print(f"!!! gen {gen} #{i}: picked now but logged as {done[i]['status']} before (selection changed?)")
+            continue
+        if log.n_mpc() >= a.budget:
+            break
+        row, xml = pending[i]
+        rk, slot, pred = picked[i]
+        row.update(sel_rank=rk, sel_slot=slot, sel_pred=pred)
+        run_mpc(a, gen, i, row, xml, log, cfg, scfg)
+    slots = [v[1] for v in picked.values()]
+    return (f" | select {a.select}: {len(cands)} passed -> {len(picked)} "
+            f"(top {slots.count('top')}, rand {slots.count('rand')}, all {slots.count('all')})")
+
+
 def run(a, out: Path) -> Log:
     log = Log(out)
     cfg = MPPIConfig(threads=a.threads, episode_control_steps=a.steps, terrain_scale=a.terrain_scale)
     scfg = ScreenConfig()
-    llm = LLM(a, out) if a.method == "llm" or a.mutation in ("llm", "llm_typed") else None
+    llm = LLM(a, out) if a.method == "llm" or a.mutation in ("llm", "llm_typed") or a.select == "llm" else None
+    selector = None
+    if a.select != "none":
+        from hyblock.selection import make_selector
+        selector = make_selector(a, out, llm)
     mutator = None
     if a.method == "ga" and a.mutation in ("llm", "llm_typed"):
         from hyblock.llm_mutation import LLMMutator
@@ -298,27 +365,34 @@ def run(a, out: Path) -> Log:
     for gen in range(a.max_gens):
         if log.n_mpc() >= a.budget:
             break
-        if all((gen, i) in log.done for i in range(a.batch)):
+        sel = selector is not None and gen > 0
+        n_prop = int(round(a.batch * a.oversample)) if sel else a.batch
+        if all((gen, i) in log.done for i in range(n_prop)):
             continue
         t0 = time.time()
         if a.method == "random":
-            props = propose_random(a, gen, log)
+            props = propose_random(a, gen, log, n_prop)
         elif a.method == "ga":
-            props = propose_ga(a, gen, log, mutator)
+            props = propose_ga(a, gen, log, mutator, n_prop)
         else:
             props = llm.propose(gen, log)
         t_prop = time.time() - t0
-        for idx, prop in enumerate(props):
-            if prop is None or (gen, idx) in log.done:
-                continue
-            if log.n_mpc() >= a.budget:
-                break
-            evaluate(a, gen, idx, prop, log, cfg, scfg)
+        sel_info = ""
+        if sel:
+            sel_info = select_and_evaluate(a, gen, props, log, cfg, scfg, selector)
+        else:
+            for idx, prop in enumerate(props):
+                if prop is None or (gen, idx) in log.done:
+                    continue
+                if log.n_mpc() >= a.budget:
+                    break
+                evaluate(a, gen, idx, prop, log, cfg, scfg)
         rows = [r for r in log.rows if int(r["gen"]) == gen]
-        st = {k: sum(r["status"] == k for r in rows) for k in ("mpc", "invalid", "screened", "duplicate", "no_design")}
+        st = {k: sum(r["status"] == k for r in rows)
+              for k in ("mpc", "invalid", "screened", "duplicate", "no_design", "unselected")}
         print(f"[{a.method} s{a.seed}] gen {gen}: " + " ".join(f"{k} {v}" for k, v in st.items() if v)
               + f" | MPC {log.n_mpc()}/{a.budget}, best {log.best():.1f} | propose {t_prop:.0f}s, "
-              f"gen {time.time() - t0:.0f}s" + (mutator.gen_stats(gen) if mutator else ""), flush=True)
+              f"gen {time.time() - t0:.0f}s" + (mutator.gen_stats(gen) if mutator else "") + sel_info, flush=True)
     return log
 
 
@@ -330,6 +404,9 @@ def write_summary(out: Path, a, log: Log) -> str:
     used = [r for r in rows if r["status"] in ("mpc", "duplicate")]       # budget order
     L = [f"Hyblock 搜索（{time.strftime('%Y-%m-%d %H:%M')}）：{a.method}，种子 {a.seed}，预算 {a.budget} 次 MPC，"
          f"每代 {a.batch}，{a.terrain} ×{a.terrain_scale}，每设计 {a.episodes} 回合，筛选 {a.screen}（{SCREEN_VERSION}）"]
+    if a.select != "none":
+        L.append(f"② 挑选：{a.select}，每代提出 {int(round(a.batch * a.oversample))}（×{a.oversample}，第 0 代除外），"
+                 f"随机名额 {a.rand_slots}" + (f"，经验池 {a.sel_pool}，{a.sel_mode}，{a.sel_votes} 票" if a.select == "llm" else ""))
     if a.method == "llm":
         L.append(f"LLM：{a.model}，effort {os.environ.get('LLM_EFFORT', 'high')}，top_k {a.top_k}，"
                  f"{'示例不写得分（--no_scores），' if a.no_scores else ''}问题 {a.problem!r}")
@@ -345,7 +422,8 @@ def write_summary(out: Path, a, log: Log) -> str:
     if a.method == "llm":
         L.append(f"提示词 sha256 {prompt_sha256(a)[:12]}…")
     L += ["", f"代数 {gens}，候选 {len(rows)}：" + "，".join(
-        f"{k} {sum(r['status'] == k for r in rows)}" for k in ("mpc", "invalid", "screened", "duplicate", "no_design"))]
+        f"{k} {sum(r['status'] == k for r in rows)}" for k in ("mpc", "invalid", "screened", "duplicate", "no_design",
+                                                             "unselected"))]
     kinds: dict[str, int] = {}
     for r in rows:
         if r["status"] in ("invalid", "screened"):
@@ -380,6 +458,8 @@ def write_summary(out: Path, a, log: Log) -> str:
                 f"{k} {n} 个中 {p:.2f}（得分差中位数 {d:+.1f}）" for k, (n, p, d) in sorted(cvp.items())))
     if a.method == "ga" and a.mutation in ("llm", "llm_typed") and (out / "llm_mut.csv").exists():
         L += mutation_summary(out, rows)
+    if a.select != "none":
+        L += selection_summary(out, rows)
     if a.method == "llm" or a.mutation in ("llm", "llm_typed"):
         tin = sum(int(r["llm_in"] or 0) for r in rows)
         tout = sum(int(r["llm_out"] or 0) for r in rows)
@@ -436,6 +516,34 @@ def mutation_summary(out: Path, rows: list[dict]) -> list[str]:
     return L
 
 
+def selection_summary(out: Path, rows: list[dict]) -> list[str]:
+    """② 的检验：随机名额上挑选器的名次与实际得分的 Spearman；送评估 / 没挑中的数量；LLM 调用。"""
+    from scipy.stats import spearmanr
+    sel = [r for r in rows if r.get("sel_slot") in ("top", "rand")]
+    unsel = [r for r in rows if r["status"] == "unselected"]
+    rand = [r for r in sel if r["sel_slot"] == "rand" and r["status"] == "mpc" and r["sel_rank"]]
+    L = [f"② 挑选：挑选后送 MPC {len(sel)}（top {sum(r['sel_slot'] == 'top' for r in sel)}，"
+         f"随机名额 {len(rand)}），没挑中 {len(unsel)}"]
+    if len(rand) >= 5:
+        # 名次按每代候选数归一（0 = 最好），各代合在一起
+        n_by_gen = {}
+        for r in rows:
+            if r.get("sel_rank"):
+                n_by_gen[r["gen"]] = n_by_gen.get(r["gen"], 0) + 1
+        q = [(float(r["sel_rank"]) - 1) / max(1, n_by_gen[r["gen"]] - 1) for r in rand]
+        rho = spearmanr(q, [-float(r["fitness"]) for r in rand]).statistic
+        L.append(f"  随机名额 {len(rand)} 个：名次（归一）与得分的 Spearman {rho:+.2f}（正 = 排得准）")
+    if (out / "select.csv").exists():
+        with open(out / "select.csv", newline="", encoding="utf-8") as f:
+            calls = list(csv.DictReader(f))
+        oc = {k: sum(c["outcome"] == k for c in calls) for k in ("ok", "partial", "fail")}
+        tin = sum(int(c["llm_in"] or 0) for c in calls)
+        tout = sum(int(c["llm_out"] or 0) for c in calls)
+        L.append(f"  LLM 挑选调用 {len(calls)} 次（" + "，".join(f"{k} {v}" for k, v in oc.items() if v)
+                 + f"），输入 {tin} / 输出 {tout} token")
+    return L
+
+
 def prompt_sha256(a) -> str:
     from hyblock.llm_io import PROMPT_DIR
     return hashlib.sha256((PROMPT_DIR / "system.txt").read_bytes()).hexdigest()
@@ -473,6 +581,13 @@ def build_parser():
     p.add_argument("--mut_poor", type=int, default=3, help="ga llm mutation: designs that failed in simulation")
     p.add_argument("--mut_failed", type=int, default=4, help="ga llm mutation: rejected (invalid / screened) designs")
     p.add_argument("--mut_similar", type=int, default=12, help="ga llm mutation: most similar evaluated designs")
+    p.add_argument("--select", choices=["none", "random", "parent", "regress", "knn", "llm"], default="none",
+                   help="② selection (random / ga only): oversample, then send --batch candidates to MPC")
+    p.add_argument("--oversample", type=float, default=2.0, help="--select: candidates proposed per generation / batch")
+    p.add_argument("--rand_slots", type=int, default=2, help="--select: MPC slots per generation drawn at random")
+    p.add_argument("--sel_pool", type=int, default=16, help="--select llm: evaluated designs shown")
+    p.add_argument("--sel_mode", choices=["rank", "half"], default="rank", help="--select llm: full ranking or pick m")
+    p.add_argument("--sel_votes", type=int, default=3, help="--select llm: calls per generation (different orders)")
     p.add_argument("--llm_workers", type=int, default=8)
     p.add_argument("--llm_cache", default=None)
     p.add_argument("--replay", action="store_true", help="llm: use cached responses only")
@@ -489,7 +604,10 @@ def main(argv=None):
         a.problem = read_txt(prompts_path("user.txt")).strip()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    if (a.method == "llm" or a.mutation in ("llm", "llm_typed")) and not a.replay and not a.summary_only:
+    if a.select != "none" and a.method == "llm":
+        raise SystemExit("--select works with --method random / ga")
+    if (a.method == "llm" or a.mutation in ("llm", "llm_typed") or a.select == "llm") and not a.replay \
+            and not a.summary_only:
         from dotenv import load_dotenv
         load_dotenv(dotenv_path=Path.cwd() / ".env")
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -502,6 +620,9 @@ def main(argv=None):
     if a.mutation in ("llm", "llm_typed"):
         from hyblock.llm_mutation import prompt_sha256 as mut_sha
         extra["mutation_prompt_sha256"] = mut_sha(a.max_modules, a.mutation == "llm_typed")
+    if a.select == "llm":
+        from hyblock.selection import prompt_sha256 as sel_sha
+        extra["select_prompt_sha256"] = sel_sha(a.max_modules)
     start(out, threads=a.threads, note=f"hyblock.search {a.method} seed {a.seed} budget {a.budget}",
           screen_version=SCREEN_VERSION, prompt_sha256=prompt_sha256(a), args=vars(a), **extra)
     log = run(a, out)
