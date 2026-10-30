@@ -406,7 +406,8 @@ def write_summary(out: Path, a, log: Log) -> str:
          f"每代 {a.batch}，{a.terrain} ×{a.terrain_scale}，每设计 {a.episodes} 回合，筛选 {a.screen}（{SCREEN_VERSION}）"]
     if a.select != "none":
         L.append(f"② 挑选：{a.select}，每代提出 {int(round(a.batch * a.oversample))}（×{a.oversample}，第 0 代除外），"
-                 f"随机名额 {a.rand_slots}" + (f"，经验池 {a.sel_pool}，{a.sel_mode}，{a.sel_votes} 票" if a.select == "llm" else ""))
+                 f"随机名额 {a.rand_slots}" + (f"，经验池 {a.sel_pool}，{a.sel_mode}，{a.sel_votes} 票" if a.select == "llm" else "")
+                 + ("，按修改种类分层（--sel_strata family）" if getattr(a, "sel_strata", "none") == "family" else ""))
     if a.method == "llm":
         L.append(f"LLM：{a.model}，effort {os.environ.get('LLM_EFFORT', 'high')}，top_k {a.top_k}，"
                  f"{'示例不写得分（--no_scores），' if a.no_scores else ''}问题 {a.problem!r}")
@@ -588,6 +589,8 @@ def build_parser():
     p.add_argument("--sel_pool", type=int, default=16, help="--select llm: evaluated designs shown")
     p.add_argument("--sel_mode", choices=["rank", "half"], default="rank", help="--select llm: full ranking or pick m")
     p.add_argument("--sel_votes", type=int, default=3, help="--select llm: calls per generation (different orders)")
+    p.add_argument("--sel_strata", choices=["none", "family"], default="none",
+                   help="--select: top slots stratified by kind of modification (week 10, 10-31)")
     p.add_argument("--llm_workers", type=int, default=8)
     p.add_argument("--llm_cache", default=None)
     p.add_argument("--replay", action="store_true", help="llm: use cached responses only")

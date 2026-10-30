@@ -14,6 +14,9 @@ hyblock/search.py --select <挑选器>：第 1 代起每代提出 round(--batch 
            最好的一半、与候选最相似的四分之一、其余按得分名次均匀取）+ 顺序打乱的候选（怎么来的、亲本得分、结构指标）
            → RANKING（全部排序，--sel_mode rank）或 SELECTED（只挑前 m 个，--sel_mode half）。--sel_votes 次调用
            （每次打乱的顺序不同），按平均名次合并。回复缓存在 llm_cache/（tag = sel<票>），续跑与重放与 LLM 变异相同
+--sel_strata family（10-31）：top 名额按修改种类分层——候选按怎么来的分为 交叉 / 删减（去掉零件、去掉脚）/ 增加（加模块、
+  加分支件、加脚、x2、mirror）/ 微调（初始角、滚转）/ 其他，各类按其候选数的比例分到名额（最大余数法），类内按挑选器的排序取；
+  挑选器与提示词不变。原因：第 10 周在线试跑中挑选器偏爱"增加 / 微调"、压低"交叉 / 删减"，把种群带离好区域（第四阶段（下）记录 第 5 节）
 记录：select.csv 每次 LLM 调用一行；evals.csv 的 sel_rank（挑选器给的名次，1 = 最好）、sel_slot（top / rand / all）、
 sel_pred（预测值：llm 为负的平均名次）。离线回放见 hyblock/select_replay.py。
 """
@@ -315,6 +318,33 @@ class LLMSel(Base):
                 self.logged.add((str(c["gen"]), str(c["vote"])))
 
 
+def family(source: str) -> str:
+    """候选怎么来的 → 修改的大类（--sel_strata family 与分析用）。"""
+    if (source or "").startswith("crossover"):
+        return "crossover"
+    k = re.findall(r"mutate:(\w+)|\[(\w+)\]", source or "")
+    k = (k[0][0] or k[0][1]) if k else ""
+    if k in ("remove_part", "remove_foot"):
+        return "remove"
+    if k in ("add_module", "add_hub", "add_foot", "parallel", "mirror"):
+        return "add"
+    if k in ("q0", "roll"):
+        return "tweak"
+    return "other"
+
+
+def quotas(counts: dict, n: int) -> dict:
+    """n 个名额按 counts 的比例分（最大余数法；余数相同时按类名）。"""
+    tot = sum(counts.values())
+    if tot == 0 or n <= 0:
+        return {k: 0 for k in counts}
+    raw = {k: n * c / tot for k, c in counts.items()}
+    q = {k: int(v) for k, v in raw.items()}
+    for k in sorted(counts, key=lambda k: (-(raw[k] - q[k]), k))[:n - sum(q.values())]:
+        q[k] += 1
+    return q
+
+
 def make_selector(a, out: Path, llm=None) -> Base:
     key = f"hyblock-search|{a.seed}"
     if a.select == "llm":
@@ -344,6 +374,14 @@ def choose(a, gen: int, cands: list[dict], hist: list[dict], selector: Base, n_e
     R = min(a.rand_slots, n_eval)
     rand = random.Random(f"hyblock-search|{a.seed}|{gen}|sel-rand").sample(range(n), R)
     picked = {p: (rank[p], "rand", round(float(scores[p]), 3)) for p in rand}
+    if getattr(a, "sel_strata", "none") == "family":
+        rest = [p for p in order if p not in picked]
+        fams = {p: family(cands[p].get("source", "")) for p in rest}
+        q = quotas({f: sum(fams[p] == f for p in rest) for f in set(fams.values())}, n_eval - len(picked))
+        for p in rest:                                   # within each family: best predicted first
+            if q.get(fams[p], 0) > 0:
+                picked[p] = (rank[p], "top", round(float(scores[p]), 3))
+                q[fams[p]] -= 1
     for p in order:
         if len(picked) >= n_eval:
             break

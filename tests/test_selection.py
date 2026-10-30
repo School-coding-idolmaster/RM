@@ -73,6 +73,32 @@ class SelectionUnitTests(unittest.TestCase):
         self.assertEqual(len(pk), 10)
 
 
+class StrataTests(unittest.TestCase):
+    def test_family_and_quotas(self):
+        self.assertEqual([selection.family(x) for x in ["crossover+mutate:roll", "mutate:remove_foot", "llm_mut[add_hub]",
+                                                         "llm_fail>mutate:q0", "random"]],
+                         ["crossover", "remove", "add", "tweak", "other"])
+        q = selection.quotas({"crossover": 9, "remove": 7, "add": 8, "tweak": 6}, 14)
+        self.assertEqual(sum(q.values()), 14)
+        self.assertEqual(q, {"crossover": 4, "remove": 3, "add": 4, "tweak": 3})
+
+    def test_stratified_choose(self):
+        """预测值偏爱 add 时：不分层几乎全挑 add；分层后各类按比例。"""
+        from types import SimpleNamespace
+        srcs = ["mutate:add_foot"] * 8 + ["crossover"] * 8 + ["mutate:remove_part"] * 8 + ["mutate:q0"] * 8
+        cands = [{"idx": k, "design": "", "source": s, "pfit": []} for k, s in enumerate(srcs)]
+
+        class Fake(selection.Base):
+            def predict(self, gen, cands, hist):
+                return np.array([10.0 if "add" in c["source"] else 0.0 for c in cands]) + np.arange(len(cands)) * 1e-3, []
+        for strata, lo, hi in (("none", 8, 8), ("family", 3, 5)):
+            a = SimpleNamespace(rand_slots=0, seed=0, sel_strata=strata)
+            res, _ = selection.choose(a, 1, cands, [], Fake("k"), 16)
+            n_add = sum(selection.family(cands[p]["source"]) == "add" for p in res["picked"])
+            self.assertTrue(lo <= n_add <= hi, (strata, n_add))
+            self.assertEqual(len(res["picked"]), 16)
+
+
 class SelectSearchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -107,6 +133,25 @@ class SelectSearchTests(unittest.TestCase):
         self.assertEqual([[r[k] for k in KEYS] for r in sorted(again, key=key)],
                          [[r[k] for k in KEYS] for r in sorted(first, key=key)])
         self.assertIn("② 挑选", (out / "summary.txt").read_text(encoding="utf-8"))
+
+    def test_strata_run_and_eval_unselected(self):
+        """--sel_strata family 端到端；诊断脚本：自检逐位一致、补跑被刷掉的候选并写报告。"""
+        out = self.tmp / "strat"
+        search.main(["--method", "ga", "--select", "knn", "--sel_strata", "family", "--budget", "8", "--batch", "4",
+                     "--rand_slots", "1", "--out", str(out)] + FAST)
+        ev = rows(out)
+        self.assertEqual(sum(r["status"] == "mpc" for r in ev), 8)
+        self.assertIn("按修改种类分层", (out / "summary.txt").read_text(encoding="utf-8"))
+        from hyblock import eval_unselected
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            eval_unselected.main(["--runs", str(out), "--per_run", "2", "--out", str(self.tmp / "diag"), "--threads", "1"])
+        self.assertIn("一致", buf.getvalue())
+        self.assertNotIn("不一致", buf.getvalue())
+        with open(self.tmp / "diag" / "unselected_evals.csv", newline="", encoding="utf-8") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 2)
+        self.assertTrue((self.tmp / "diag" / "report.md").exists())
 
     def test_select_llm_cache_replay(self):
         """--select llm：每代 3 票（顺序不同）；坏回复记为 fail；top 名额 = 合并名次最前的；--replay 不调用 API、结果相同。"""
