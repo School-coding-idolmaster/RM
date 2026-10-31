@@ -153,6 +153,28 @@ class SelectSearchTests(unittest.TestCase):
             self.assertEqual(len(list(csv.DictReader(f))), 2)
         self.assertTrue((self.tmp / "diag" / "report.md").exists())
 
+    def test_warmup_sel_from_and_init_from(self):
+        """--sel_from 3：第 0–2 代与普通 GA 逐位相同；--init_from 复制这几代后续跑，结果与从头跑相同；配错种子会报错。"""
+        ga = self.tmp / "ga"
+        search.main(["--method", "ga", "--budget", "12", "--batch", "4", "--out", str(ga)] + FAST)
+        base = ["--method", "ga", "--select", "knn", "--sel_strata", "family", "--sel_from", "3", "--budget", "16",
+                "--batch", "4", "--rand_slots", "1"] + FAST
+        full = self.tmp / "full"
+        search.main(base + ["--out", str(full)])
+        a = rows(full)
+        keys = ["gen", "idx", "source", "parents", "design", "status", "fitness"]
+        self.assertEqual([[r[k] for k in keys] for r in a if int(r["gen"]) < 3],
+                         [[r[k] for k in keys] for r in rows(ga)])
+        self.assertFalse(any(r["status"] == "unselected" for r in a if int(r["gen"]) < 3))
+        self.assertTrue(any(r["status"] == "unselected" for r in a if int(r["gen"]) == 3))
+        cp = self.tmp / "copied"
+        search.main(base + ["--out", str(cp), "--init_from", str(ga / "evals.csv")])
+        self.assertEqual([[r[k] for k in keys + ["sel_rank", "sel_slot"]] for r in rows(cp)],
+                         [[r[k] for k in keys + ["sel_rank", "sel_slot"]] for r in a])
+        self.assertIn("第 3 代起才挑选", (cp / "summary.txt").read_text(encoding="utf-8"))
+        with self.assertRaises(SystemExit):
+            search.main(base + ["--out", str(self.tmp / "bad"), "--seed", "5", "--init_from", str(ga / "evals.csv")])
+
     def test_select_llm_cache_replay(self):
         """--select llm：每代 3 票（顺序不同）；坏回复记为 fail；top 名额 = 合并名次最前的；--replay 不调用 API、结果相同。"""
         calls = []

@@ -17,6 +17,8 @@
   --select <挑选器>（第 10 周，② 挑选；random / ga）：第 1 代起每代提出 round(batch × --oversample) 个候选，① 筛选后只把
           batch 个送 MPC（--rand_slots 个随机抽，其余按挑选器排序取前面的）；没挑中的记为 unselected，不占预算。
           挑选器 random / parent / regress / knn / llm，见 hyblock/selection.py
+          --sel_from G（10-31，"预热"）：第 G 代起才挑选，之前与普通 GA 完全相同；--init_from <配对运行的 evals.csv>
+          直接复制其第 G 代以前的记录（同一种子、同一设置下与重跑逐位相同，省 MPC 时间；开头核对第 0 代）
 
 续跑：evals.csv 每评估一个候选写一行，键 = (代, 序号)。随机数按 (种子, 代) 生成，LLM 回复存在 llm_cache/
 （键含模型、提示词、种子、代、序号），所以中断后重新运行会得到同样的候选并跳过已完成的行。
@@ -365,7 +367,7 @@ def run(a, out: Path) -> Log:
     for gen in range(a.max_gens):
         if log.n_mpc() >= a.budget:
             break
-        sel = selector is not None and gen > 0
+        sel = selector is not None and gen >= max(1, a.sel_from)
         n_prop = int(round(a.batch * a.oversample)) if sel else a.batch
         if all((gen, i) in log.done for i in range(n_prop)):
             continue
@@ -407,7 +409,9 @@ def write_summary(out: Path, a, log: Log) -> str:
     if a.select != "none":
         L.append(f"② 挑选：{a.select}，每代提出 {int(round(a.batch * a.oversample))}（×{a.oversample}，第 0 代除外），"
                  f"随机名额 {a.rand_slots}" + (f"，经验池 {a.sel_pool}，{a.sel_mode}，{a.sel_votes} 票" if a.select == "llm" else "")
-                 + ("，按修改种类分层（--sel_strata family）" if getattr(a, "sel_strata", "none") == "family" else ""))
+                 + ("，按修改种类分层（--sel_strata family）" if getattr(a, "sel_strata", "none") == "family" else "")
+                 + (f"，第 {a.sel_from} 代起才挑选（之前同普通 GA" + (f"，复制自 {a.init_from}）" if a.init_from else "）")
+                    if a.sel_from > 1 else ""))
     if a.method == "llm":
         L.append(f"LLM：{a.model}，effort {os.environ.get('LLM_EFFORT', 'high')}，top_k {a.top_k}，"
                  f"{'示例不写得分（--no_scores），' if a.no_scores else ''}问题 {a.problem!r}")
@@ -550,6 +554,25 @@ def prompt_sha256(a) -> str:
     return hashlib.sha256((PROMPT_DIR / "system.txt").read_bytes()).hexdigest()
 
 
+def init_copy(a, out: Path) -> None:
+    """--init_from：把配对运行第 sel_from 代以前的行复制进新的 evals.csv（用完整表头）。先核对第 0 代与本种子的随机设计相同。"""
+    with open(a.init_from, newline="", encoding="utf-8") as f:
+        src = [r for r in csv.DictReader(f) if int(r["gen"]) < a.sel_from]
+    g0 = [r["design"] for r in src if r["gen"] == "0"]
+    mine = [to_text(parse(p["design"])) for p in propose_random(a, 0, None)]
+    if g0 != mine[:len(g0)] or not g0:
+        raise SystemExit(f"--init_from {a.init_from}: generation 0 differs from seed {a.seed} — not the paired run")
+    gens = sorted({int(r["gen"]) for r in src})
+    if gens != list(range(a.sel_from)):
+        raise SystemExit(f"--init_from: needs generations 0..{a.sel_from - 1}, found {gens}")
+    with open(out / "evals.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for r in src:
+            w.writerow({k: r.get(k, "") for k in FIELDS})
+    print(f"--init_from：复制第 0–{a.sel_from - 1} 代 {len(src)} 行（{a.init_from}）", flush=True)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="Hyblock search baselines (random / ga / llm)")
     p.add_argument("--method", choices=["random", "ga", "llm"], required=True)
@@ -589,6 +612,9 @@ def build_parser():
     p.add_argument("--sel_pool", type=int, default=16, help="--select llm: evaluated designs shown")
     p.add_argument("--sel_mode", choices=["rank", "half"], default="rank", help="--select llm: full ranking or pick m")
     p.add_argument("--sel_votes", type=int, default=3, help="--select llm: calls per generation (different orders)")
+    p.add_argument("--sel_from", type=int, default=1, help="--select: first generation that is selected (warm-up)")
+    p.add_argument("--init_from", default=None,
+                   help="--sel_from: copy generations < sel_from from this evals.csv (same seed and settings)")
     p.add_argument("--sel_strata", choices=["none", "family"], default="none",
                    help="--select: top slots stratified by kind of modification (week 10, 10-31)")
     p.add_argument("--llm_workers", type=int, default=8)
@@ -618,6 +644,8 @@ def main(argv=None):
     if a.summary_only:
         print(write_summary(out, a, Log(out)))
         return
+    if a.init_from and not (out / "evals.csv").exists():
+        init_copy(a, out)
     from wj_tools.run_meta import done, start
     extra = {}
     if a.mutation in ("llm", "llm_typed"):
