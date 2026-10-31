@@ -33,7 +33,8 @@ from scipy.stats import spearmanr
 
 from hyblock import selection
 
-PRICE_IN, PRICE_OUT = 0.10, 0.50                  # $/M token（llm_mutation 的冒烟检查用同一估计）
+PRICE = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.0, 10.0)}   # $/M token（10-31 官网定价页）
+PRICE_IN, PRICE_OUT = PRICE["claude-haiku-5-5"]   # llm_mutation 的冒烟检查用同一估计
 
 
 def load_problems(runs: list[Path], min_cands: int = 4) -> list[dict]:
@@ -205,7 +206,7 @@ def main(argv=None):
                 oc = {o: sum(c["outcome"] == o for c in cs) for o in ("ok", "partial", "fail")}
                 L.append(f"| p{K} {mode} | {len(cs)} | {oc['ok']} | {oc['partial']} | {oc['fail']} | "
                          f"{tin / max(1, len(cs)):.0f} / {tout / max(1, len(cs)):.0f} | "
-                         f"${(tin * PRICE_IN + tout * PRICE_OUT) / 1e6:.2f} |")
+                         f"${(tin * PRICE.get(a.model, (PRICE_IN, PRICE_OUT))[0] + tout * PRICE.get(a.model, (PRICE_IN, PRICE_OUT))[1]) / 1e6:.2f} |")
         L.append("")
     (out / "report.md").write_text("\n".join(L) + "\n", encoding="utf-8")
     print("\n".join(L))
