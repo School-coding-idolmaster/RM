@@ -355,7 +355,8 @@ def run(a, out: Path) -> Log:
     log = Log(out)
     cfg = MPPIConfig(threads=a.threads, episode_control_steps=a.steps, terrain_scale=a.terrain_scale)
     scfg = ScreenConfig()
-    llm = LLM(a, out) if a.method == "llm" or a.mutation in ("llm", "llm_typed") or a.select == "llm" else None
+    llm = LLM(a, out) if a.method == "llm" or a.mutation in ("llm", "llm_typed") or a.select == "llm" \
+        or a.init in ("llm", "llm_transfer") else None
     selector = None
     if a.select != "none":
         from hyblock.selection import make_selector
@@ -372,7 +373,10 @@ def run(a, out: Path) -> Log:
         if all((gen, i) in log.done for i in range(n_prop)):
             continue
         t0 = time.time()
-        if a.method == "random":
+        if gen == 0 and a.init != "random":
+            from hyblock.init_pop import propose_init
+            props = propose_init(a, out, llm)
+        elif a.method == "random":
             props = propose_random(a, gen, log, n_prop)
         elif a.method == "ga":
             props = propose_ga(a, gen, log, mutator, n_prop)
@@ -617,6 +621,9 @@ def build_parser():
                    help="--sel_from: copy generations < sel_from from this evals.csv (same seed and settings)")
     p.add_argument("--sel_strata", choices=["none", "family"], default="none",
                    help="--select: top slots stratified by kind of modification (week 10, 10-31)")
+    p.add_argument("--init", choices=["random", "llm", "transfer", "llm_transfer"], default="random",
+                   help="ga: generation 0 (hyblock/init_pop.py; week 12)")
+    p.add_argument("--init_source", default=None, help="--init transfer / llm_transfer: flat-ground evals.csv")
     p.add_argument("--llm_workers", type=int, default=8)
     p.add_argument("--llm_cache", default=None)
     p.add_argument("--replay", action="store_true", help="llm: use cached responses only")
@@ -635,12 +642,23 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     if a.select != "none" and a.method == "llm":
         raise SystemExit("--select works with --method random / ga")
-    if (a.method == "llm" or a.mutation in ("llm", "llm_typed") or a.select == "llm") and not a.replay \
+    if a.init != "random" and a.method != "ga":
+        raise SystemExit("--init works with --method ga")
+    if a.init in ("transfer", "llm_transfer") and not a.init_source:
+        raise SystemExit("--init transfer / llm_transfer needs --init_source <flat evals.csv>")
+    if a.init != "random" and a.init_from:
+        raise SystemExit("--init_from checks generation 0 against random designs; not supported with --init yet")
+    if a.init in ("llm", "llm_transfer") and a.terrain != "flat" and a.terrain_scale != 1.0:
+        raise SystemExit("terrain_text.py describes the terrain at --terrain_scale 1.0 only")
+    if (a.method == "llm" or a.mutation in ("llm", "llm_typed") or a.select == "llm"
+            or a.init in ("llm", "llm_transfer")) and not a.replay \
             and not a.summary_only:
         from dotenv import load_dotenv
         load_dotenv(dotenv_path=Path.cwd() / ".env")
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise SystemExit("ANTHROPIC_API_KEY missing (.env) — run copy_env_to_mac.bat on Windows")
+    if a.terrain != "flat" and a.terrain_scale != 1.0 and (a.mutation != "random" or a.select == "llm"):
+        raise SystemExit("terrain_text.py describes the terrain at --terrain_scale 1.0 only")
     if a.summary_only:
         print(write_summary(out, a, Log(out)))
         return
@@ -650,10 +668,15 @@ def main(argv=None):
     extra = {}
     if a.mutation in ("llm", "llm_typed"):
         from hyblock.llm_mutation import prompt_sha256 as mut_sha
-        extra["mutation_prompt_sha256"] = mut_sha(a.max_modules, a.mutation == "llm_typed")
+        extra["mutation_prompt_sha256"] = mut_sha(a.max_modules, a.mutation == "llm_typed", a.terrain)
+    if a.init in ("llm", "llm_transfer"):
+        import hashlib
+        from hyblock.init_pop import system_prompt as init_sys
+        extra["init_prompt_sha256"] = hashlib.sha256(init_sys("init" if a.init == "llm" else "transfer", a.terrain,
+                                                              a.max_modules, a.batch).encode("utf-8")).hexdigest()
     if a.select == "llm":
         from hyblock.selection import prompt_sha256 as sel_sha
-        extra["select_prompt_sha256"] = sel_sha(a.max_modules)
+        extra["select_prompt_sha256"] = sel_sha(a.max_modules, a.terrain)
     start(out, threads=a.threads, note=f"hyblock.search {a.method} seed {a.seed} budget {a.budget}",
           screen_version=SCREEN_VERSION, prompt_sha256=prompt_sha256(a), args=vars(a), **extra)
     log = run(a, out)
