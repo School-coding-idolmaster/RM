@@ -261,7 +261,7 @@ def precheck(a, gen: int, idx: int, prop: dict, log: Log, scfg: ScreenConfig) ->
         return row, None
     t0 = time.time()
     try:
-        xml = compile_design(text, max_modules=a.max_modules)
+        xml = compile_design(text, max_modules=a.max_modules, **physics_kw(a))
         s = design_summary(text)
         row.update(modules=s["modules"], hubs=s["hubs"], joints=s["joints"], feet=s["feet"], root=s["root"])
     except DesignError as e:
@@ -274,6 +274,19 @@ def precheck(a, gen: int, idx: int, prop: dict, log: Log, scfg: ScreenConfig) ->
             row.update(status="screened", kind=sr.reason, detail=sr.detail[:200])
             return row, None
     return row, xml
+
+
+def physics_kw(a) -> dict:
+    """敏感性分析（第 14 周，claude/正式实验计划.md 变更记录第 16 条）：只把和默认值不同的物理参数传给 compile_design。
+    默认（8 MPa、质量 ×1.0、速度上限 = modules.yaml）时返回 {}，编译结果与之前逐字节相同。"""
+    kw = {}
+    if getattr(a, "pressure", 8.0) != 8.0:
+        kw["pressure_MPa"] = a.pressure
+    if getattr(a, "mass_scale", 1.0) != 1.0:
+        kw["mass_scale"] = a.mass_scale
+    if getattr(a, "max_speed_deg", None) is not None:
+        kw["max_speed_deg_s"] = a.max_speed_deg
+    return kw
 
 
 def evaluate(a, gen: int, idx: int, prop: dict, log: Log, cfg: MPPIConfig, scfg: ScreenConfig) -> None:
@@ -410,6 +423,8 @@ def write_summary(out: Path, a, log: Log) -> str:
     used = [r for r in rows if r["status"] in ("mpc", "duplicate")]       # budget order
     L = [f"Hyblock 搜索（{time.strftime('%Y-%m-%d %H:%M')}）：{a.method}，种子 {a.seed}，预算 {a.budget} 次 MPC，"
          f"每代 {a.batch}，{a.terrain} ×{a.terrain_scale}，每设计 {a.episodes} 回合，筛选 {a.screen}（{SCREEN_VERSION}）"]
+    if physics_kw(a):
+        L.append("物理参数（敏感性）：" + "，".join(f"{k} = {v}" for k, v in physics_kw(a).items()))
     if a.select != "none":
         L.append(f"② 挑选：{a.select}，每代提出 {int(round(a.batch * a.oversample))}（×{a.oversample}，第 0 代除外），"
                  f"随机名额 {a.rand_slots}" + (f"，经验池 {a.sel_pool}，{a.sel_mode}，{a.sel_votes} 票" if a.select == "llm" else "")
@@ -588,6 +603,9 @@ def build_parser():
     p.add_argument("--max_modules", type=int, default=8)
     p.add_argument("--terrain", default="flat")
     p.add_argument("--terrain_scale", type=float, default=1.0)
+    p.add_argument("--pressure", type=float, default=8.0, help="sensitivity: supply pressure [MPa] (torque limits scale with it)")
+    p.add_argument("--mass_scale", type=float, default=1.0, help="sensitivity: multiply all part masses")
+    p.add_argument("--max_speed_deg", type=float, default=None, help="sensitivity: joint speed limit [deg/s] (default modules.yaml)")
     p.add_argument("--episodes", type=int, default=2)
     p.add_argument("--steps", type=int, default=250, help="control steps per episode")
     p.add_argument("--mpc_seed", type=int, default=0)
