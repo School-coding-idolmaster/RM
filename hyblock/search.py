@@ -425,6 +425,8 @@ def write_summary(out: Path, a, log: Log) -> str:
          f"每代 {a.batch}，{a.terrain} ×{a.terrain_scale}，每设计 {a.episodes} 回合，筛选 {a.screen}（{SCREEN_VERSION}）"]
     if physics_kw(a):
         L.append("物理参数（敏感性）：" + "，".join(f"{k} = {v}" for k, v in physics_kw(a).items()))
+    if getattr(a, "prompt_speed_deg", None) is not None:
+        L.append(f"提示词里的速度上限（追加 D）：about {int(round(a.prompt_speed_deg))} deg/s（hyblock/prompt_phys.py）")
     if a.select != "none":
         L.append(f"② 挑选：{a.select}，每代提出 {int(round(a.batch * a.oversample))}（×{a.oversample}，第 0 代除外），"
                  f"随机名额 {a.rand_slots}" + (f"，经验池 {a.sel_pool}，{a.sel_mode}，{a.sel_votes} 票" if a.select == "llm" else "")
@@ -441,7 +443,7 @@ def write_summary(out: Path, a, log: Log) -> str:
             L.append(f"LLM 变异：{a.model}，effort {os.environ.get('LLM_EFFORT', 'high')}，重问 {a.mut_retries} 次；"
                      f"上下文 好 {a.mut_good} / 失败 {a.mut_poor} / 被拒 {a.mut_failed} / 相似 {a.mut_similar}；"
                      f"{'按种类引导（llm_typed），' if a.mutation == 'llm_typed' else ''}"
-                     f"系统提示 sha256 {mut_sha(a.max_modules, a.mutation == 'llm_typed')[:12]}…")
+                     f"系统提示 sha256 {mut_sha(a.max_modules, a.mutation == 'llm_typed', speed_deg=getattr(a, 'prompt_speed_deg', None))[:12]}…")
     gens = 1 + max((int(r["gen"]) for r in rows), default=-1)
     if a.method == "llm":
         L.append(f"提示词 sha256 {prompt_sha256(a)[:12]}…")
@@ -606,6 +608,8 @@ def build_parser():
     p.add_argument("--pressure", type=float, default=8.0, help="sensitivity: supply pressure [MPa] (torque limits scale with it)")
     p.add_argument("--mass_scale", type=float, default=1.0, help="sensitivity: multiply all part masses")
     p.add_argument("--max_speed_deg", type=float, default=None, help="sensitivity: joint speed limit [deg/s] (default modules.yaml)")
+    p.add_argument("--prompt_speed_deg", type=float, default=None,
+                   help="LLM prompts state this joint speed limit instead of 'about 1200 deg/s' (week 15, add-on D)")
     p.add_argument("--episodes", type=int, default=2)
     p.add_argument("--steps", type=int, default=250, help="control steps per episode")
     p.add_argument("--mpc_seed", type=int, default=0)
@@ -677,6 +681,8 @@ def main(argv=None):
             raise SystemExit("ANTHROPIC_API_KEY missing (.env) — run copy_env_to_mac.bat on Windows")
     if a.terrain != "flat" and a.terrain_scale != 1.0 and (a.mutation != "random" or a.select == "llm"):
         raise SystemExit("terrain_text.py describes the terrain at --terrain_scale 1.0 only")
+    if a.prompt_speed_deg is not None and (a.method == "llm" or a.init in ("llm", "llm_transfer")):
+        raise SystemExit("--prompt_speed_deg only adapts the LLM mutation and ② selection prompts")
     if a.summary_only:
         print(write_summary(out, a, Log(out)))
         return
@@ -686,7 +692,8 @@ def main(argv=None):
     extra = {}
     if a.mutation in ("llm", "llm_typed"):
         from hyblock.llm_mutation import prompt_sha256 as mut_sha
-        extra["mutation_prompt_sha256"] = mut_sha(a.max_modules, a.mutation == "llm_typed", a.terrain)
+        extra["mutation_prompt_sha256"] = mut_sha(a.max_modules, a.mutation == "llm_typed", a.terrain,
+                                                  a.prompt_speed_deg)
     if a.init in ("llm", "llm_transfer"):
         import hashlib
         from hyblock.init_pop import system_prompt as init_sys
@@ -694,7 +701,7 @@ def main(argv=None):
                                                               a.max_modules, a.batch).encode("utf-8")).hexdigest()
     if a.select == "llm":
         from hyblock.selection import prompt_sha256 as sel_sha
-        extra["select_prompt_sha256"] = sel_sha(a.max_modules, a.terrain)
+        extra["select_prompt_sha256"] = sel_sha(a.max_modules, a.terrain, a.prompt_speed_deg)
     start(out, threads=a.threads, note=f"hyblock.search {a.method} seed {a.seed} budget {a.budget}",
           screen_version=SCREEN_VERSION, prompt_sha256=prompt_sha256(a), args=vars(a), **extra)
     log = run(a, out)

@@ -45,16 +45,18 @@ OPS = {"add_module": "added a module", "add_hub": "added a hub", "remove_part": 
        "mirror": "added or removed mirror", "add_foot": "added a foot", "remove_foot": "removed a foot"}
 
 
-def system_prompt(max_modules: int, terrain: str = "flat") -> str:
-    """terrain != flat：hyblock/terrain_text.py 换掉 "flat ground" 并加地形段（平地逐字节不变）。"""
+def system_prompt(max_modules: int, terrain: str = "flat", speed_deg: float | None = None) -> str:
+    """terrain != flat：hyblock/terrain_text.py 换掉 "flat ground" 并加地形段（平地逐字节不变）。
+    speed_deg：hyblock/prompt_phys.py 改写提示词里的速度上限（追加 D；None = 不变）。"""
+    from hyblock.prompt_phys import adapt_speed
     from hyblock.terrain_text import adapt
     base = (PROMPT_DIR / "system.txt").read_text(encoding="utf-8")
     text = base[:base.index(MARKER)].rstrip() + "\n\n" + (PROMPT_DIR / "select.txt").read_text(encoding="utf-8")
-    return adapt(text.replace("{max_modules}", str(max_modules)), terrain)
+    return adapt_speed(adapt(text.replace("{max_modules}", str(max_modules)), terrain), speed_deg)
 
 
-def prompt_sha256(max_modules: int = 8, terrain: str = "flat") -> str:
-    return hashlib.sha256(system_prompt(max_modules, terrain).encode("utf-8")).hexdigest()
+def prompt_sha256(max_modules: int = 8, terrain: str = "flat", speed_deg: float | None = None) -> str:
+    return hashlib.sha256(system_prompt(max_modules, terrain, speed_deg).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------- 候选与特征
@@ -261,10 +263,11 @@ class LLMSel(Base):
     name = "llm"
 
     def __init__(self, key: str, llm, max_modules: int = 8, pool: int = 16, mode: str = "rank", votes: int = 3,
-                 workers: int = 8, m: int | None = None, log_path: Path | None = None, terrain: str = "flat"):
+                 workers: int = 8, m: int | None = None, log_path: Path | None = None, terrain: str = "flat",
+                 speed_deg: float | None = None):
         super().__init__(key)
         self.llm, self.pool, self.mode, self.votes, self.workers, self.m = llm, pool, mode, votes, workers, m
-        self.system = system_prompt(max_modules, terrain)
+        self.system = system_prompt(max_modules, terrain, speed_deg)
         self.log_path = log_path
         self.logged = set()
         if log_path and log_path.exists():
@@ -351,7 +354,8 @@ def make_selector(a, out: Path, llm=None) -> Base:
     key = f"hyblock-search|{a.seed}"
     if a.select == "llm":
         return LLMSel(key, llm, a.max_modules, a.sel_pool, a.sel_mode, a.sel_votes, a.llm_workers,
-                      log_path=out / "select.csv", terrain=getattr(a, "terrain", "flat"))
+                      log_path=out / "select.csv", terrain=getattr(a, "terrain", "flat"),
+                      speed_deg=getattr(a, "prompt_speed_deg", None))
     return {"random": RandomSel, "parent": ParentSel, "regress": RegressSel, "knn": KnnSel}[a.select](key)
 
 

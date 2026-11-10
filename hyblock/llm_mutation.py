@@ -80,17 +80,19 @@ KIND_TEXT = {
 }
 
 
-def system_prompt(max_modules: int, typed: bool = False, terrain: str = "flat") -> str:
-    """terrain != flat：hyblock/terrain_text.py 换掉 "flat ground" 并加地形段（平地逐字节不变）。"""
+def system_prompt(max_modules: int, typed: bool = False, terrain: str = "flat", speed_deg: float | None = None) -> str:
+    """terrain != flat：hyblock/terrain_text.py 换掉 "flat ground" 并加地形段（平地逐字节不变）。
+    speed_deg：hyblock/prompt_phys.py 改写提示词里的速度上限（追加 D；None = 不变）。"""
+    from hyblock.prompt_phys import adapt_speed
     from hyblock.terrain_text import adapt
     base = (PROMPT_DIR / "system.txt").read_text(encoding="utf-8")
     common = base[:base.index(MARKER)].rstrip() + "\n\n"
     text = common + (PROMPT_DIR / ("mutate_typed.txt" if typed else "mutate.txt")).read_text(encoding="utf-8")
-    return adapt(text.replace("{max_modules}", str(max_modules)), terrain)
+    return adapt_speed(adapt(text.replace("{max_modules}", str(max_modules)), terrain), speed_deg)
 
 
-def prompt_sha256(max_modules: int = 8, typed: bool = False, terrain: str = "flat") -> str:
-    return hashlib.sha256(system_prompt(max_modules, typed, terrain).encode("utf-8")).hexdigest()
+def prompt_sha256(max_modules: int = 8, typed: bool = False, terrain: str = "flat", speed_deg: float | None = None) -> str:
+    return hashlib.sha256(system_prompt(max_modules, typed, terrain, speed_deg).encode("utf-8")).hexdigest()
 
 
 def edit_kinds(parent: str, child: str) -> tuple[set, int]:
@@ -280,7 +282,8 @@ class LLMMutator:
         self.llm = llm                                   # search.LLM: cache, replay, API call
         self.spec = load_spec()
         self.typed = getattr(a, "mutation", "llm") == "llm_typed"
-        self.system = system_prompt(a.max_modules, self.typed, getattr(a, "terrain", "flat"))
+        self.system = system_prompt(a.max_modules, self.typed, getattr(a, "terrain", "flat"),
+                                    getattr(a, "prompt_speed_deg", None))
         self.path = out / "llm_mut.csv"
         self.attempts: list[dict] = []
         if self.path.exists():
